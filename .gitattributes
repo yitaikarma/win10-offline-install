@@ -1,0 +1,4 @@
+# 交付物在 Windows 上运行：脚本必须 CRLF（LF-only 的 .cmd 在 cmd.exe 下是已知风险）
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
