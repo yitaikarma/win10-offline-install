@@ -357,6 +357,47 @@ if (-not $launcher) {
     Get-ChildItem -Path $stageApp -Recurse -Depth 2 -Force | Select-Object -ExpandProperty FullName | ForEach-Object { Write-Host "        $_" }
     throw "Expected an openclaw launcher under $stageApp - check the layout printed above."
 }
+
+# ---------------------------------------------------------------- upgrade artifact
+# The air-gapped upgrade path is `openclaw update --tag <tarball>` (officially supported
+# target shape), so the bundle must carry the release artifact itself. `npm pack` also
+# warms the same cache the target uses offline for the package's transitive deps.
+Write-Step "Packaging the upgrade artifact (openclaw-$resolvedOpenClaw.tgz)"
+
+$tarballName = "openclaw-$resolvedOpenClaw.tgz"
+$tarballPath = Join-Path $bundleRoot $tarballName
+if (Test-Path $tarballPath) {
+    Write-Ok "already present: $tarballName (re-using)"
+} else {
+    $packArgs = @('pack', "openclaw@$resolvedOpenClaw", '--cache', $stageCache, '--pack-destination', $bundleRoot)
+    Write-Host "    npm $($packArgs -join ' ')"
+    $packRun = Invoke-Native -Command 'npm' -Arguments $packArgs -Show
+    if ($packRun.ExitCode -ne 0) { throw "npm pack failed with exit code $($packRun.ExitCode)" }
+}
+if (-not (Test-Path $tarballPath)) {
+    $packed = Get-ChildItem -Path $bundleRoot -Filter 'openclaw-*.tgz' -File | Select-Object -First 1
+    if (-not $packed) { throw "npm pack did not produce openclaw-$resolvedOpenClaw.tgz in $bundleRoot" }
+    $tarballPath = $packed.FullName
+    $tarballName = $packed.Name
+    Write-Note "npm wrote $tarballName instead of the expected name; using it."
+}
+$tarballHash = (Get-FileHash -Path $tarballPath -Algorithm SHA256).Hash
+Write-Ok "$tarballName $([math]::Round((Get-Item $tarballPath).Length/1MB,1)) MB"
+# npm 12 rejects local .tgz installs whose archive name or parent path contains a comma.
+if ("$bundleRoot$tarballName" -match ',') {
+    Write-Note 'The bundle path or tarball name contains a comma - npm 12 rejects local .tgz installs in that case. Choose another -OutDir.'
+}
+
+# Ship the operator/AI-facing upgrade docs with the bundle (the target has no internet).
+foreach ($docName in @('UPGRADE.md', 'UPGRADE-BRIEF.md')) {
+    $docSrc = Join-Path $PSScriptRoot $docName
+    if (Test-Path $docSrc) {
+        Copy-Item -Path $docSrc -Destination (Join-Path $bundleRoot $docName) -Force
+        Write-Ok "carried $docName"
+    } else {
+        Write-Note "$docName is not next to this script - the bundle will not carry it."
+    }
+}
 Write-Ok "Launcher: $($launcher.FullName)"
 
 # ---------------------------------------------------------------- docs
@@ -431,17 +472,24 @@ Write-Step 'Writing manifest'
 
 $appFiles = @(Get-ChildItem -Path $stageApp -Recurse -File -Force)
 $pkgJson  = Join-Path $stageApp 'node_modules\openclaw\package.json'
-$installedVersion = if (Test-Path $pkgJson) { (Get-Content $pkgJson -Raw | ConvertFrom-Json).version } else { $resolvedOpenClaw }
+$pkgMeta  = if (Test-Path $pkgJson) { Get-Content $pkgJson -Raw | ConvertFrom-Json } else { $null }
+$installedVersion = if ($pkgMeta) { $pkgMeta.version } else { $resolvedOpenClaw }
+# Declared DB schema of this build. The target's upgrade script compares it with the
+# installed build's and warns that a forward migration makes rollback backup-only.
+$schemaVersions = Get-Prop (Get-Prop $pkgMeta 'openclaw') 'schemaVersions'
 
 $manifest = [ordered]@{
-    schemaVersion       = 3
+    schemaVersion       = 4
     builtAtUtc          = (Get-Date).ToUniversalTime().ToString('o')
     builtOn             = "Windows $arch"
     openClawVersion     = $installedVersion
+    schemaVersions      = $schemaVersions
     nodeBundled         = [bool]$IncludeNode
     nodeVersion         = $nodePicked
     nodeZip             = $nodeZipName
     nodeZipSha256       = $nodeHash
+    packagedTarball     = $tarballName
+    tarballSha256       = $tarballHash
     appFileCount        = $appFiles.Count
     appBytes            = ($appFiles | Measure-Object -Property Length -Sum).Sum
     npmVersionUsed      = $npmVerRaw
@@ -473,6 +521,21 @@ Do not rename app\ , docs\ , npm-cache\ or bundle-manifest.json.
 No desktop app and no WebView2 runtime are included: use the browser Control UI
 (http://127.0.0.1:18789) or pair another client with the setup code the installer
 prints.
+
+Upgrading this installation later (see UPGRADE-BRIEF.md for the full procedure):
+
+  1. Build a new bundle on a networked Windows x64 machine with the same
+     Make-OpenClawOfflineBundle.ps1. It carries openclaw-<version>.tgz plus a
+     warm npm-cache\ - that is what makes the offline upgrade possible.
+  2. On this host run upgrade.cmd (double-click) or:
+         powershell -ExecutionPolicy Bypass -File .\Upgrade-OpenClawOffline.ps1
+     It backs up state first, stops the Gateway, runs the official
+         openclaw update --tag <bundle>\openclaw-<version>.tgz --dry-run
+     preflight, then applies the update and reinstalls the service.
+  3. Rollback is BACKUP-ONLY. Upgrading migrates the state database forward and
+     older builds then refuse to open it, so restoring an old package does not
+     work: restore the pre-upgrade archive instead
+         openclaw backup restore <archive> --target <empty dir>
 
 Reading the docs on the air-gapped host: open docs\docs_map.md for the page
 index. Note that the 'openclaw docs' command searches the live website and will

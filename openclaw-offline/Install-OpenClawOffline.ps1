@@ -215,8 +215,10 @@ if ($protectedRoots -contains $InstallRoot.TrimEnd('\')) {
 Write-Step "Installing OpenClaw into $InstallRoot"
 
 if (Test-Path $InstallRoot) {
-    if (-not $Force) { throw "$InstallRoot already exists. Re-run with -Force to replace it." }
-    Write-Note "-Force: removing the existing tree at $InstallRoot"
+    if (-not $Force) {
+        throw "$InstallRoot already exists. To UPGRADE an existing install use Upgrade-OpenClawOffline.ps1 from a newer bundle (it keeps state and can be rolled back); to wipe and reinstall from scratch, re-run with -Force (rescue mode)."
+    }
+    Write-Note "-Force (rescue mode): removing the existing tree at $InstallRoot"
     Remove-Item -Recurse -Force $InstallRoot
 }
 $appDir = Join-Path $InstallRoot 'app'
@@ -228,6 +230,21 @@ if ($mode -eq 'app') {
     $rc = Invoke-Robocopy $appStage $appDir
     if ($rc -ge 8) { throw "robocopy failed with exit code $rc" }
     Write-Ok 'Application files copied'
+
+    # The app tree is the payload most exposed to USB/media corruption and the manifest
+    # already records its shape, so compare it instead of trusting the copy.
+    $expectedCount = Get-Prop $manifest 'appFileCount'
+    $expectedBytes = Get-Prop $manifest 'appBytes'
+    $copiedFiles = @(Get-ChildItem -Path $appDir -Recurse -File -Force)
+    $copiedBytes = ($copiedFiles | Measure-Object -Property Length -Sum).Sum
+    if ($null -eq $copiedBytes) { $copiedBytes = 0 }
+    if ($null -ne $expectedCount -and $copiedFiles.Count -ne [int]$expectedCount) {
+        throw "App tree file count mismatch after copy: expected $expectedCount, found $($copiedFiles.Count). The bundle or the media is damaged - do not use this installation."
+    }
+    if ($null -ne $expectedBytes -and $copiedBytes -ne [long]$expectedBytes) {
+        throw "App tree byte count mismatch after copy: expected $expectedBytes, found $copiedBytes. The bundle or the media is damaged - do not use this installation."
+    }
+    Write-Ok "app tree verified: $($copiedFiles.Count) files / $([math]::Round($copiedBytes/1MB,1)) MB"
 } else {
     Write-Host '    Copying the npm cache ...'
     $rc = Invoke-Robocopy $cacheStage $cacheDir
@@ -406,6 +423,15 @@ if ($configureProvider) {
     }
 }
 
+# The Gateway checks https://telemetry.openclaw.ai on start and at most once every 24h
+# by default. This host has no internet, so switch that off (official opt-out).
+$checkRun = Invoke-Native -Command $openclawCmd -Arguments @('config', 'set', 'update.checkOnStart', 'false')
+if ($checkRun.ExitCode -ne 0) {
+    Write-Note 'Could not set update.checkOnStart=false; set OPENCLAW_NO_AUTO_UPDATE=1 in the Gateway environment instead.'
+} else {
+    Write-Ok 'update.checkOnStart=false (no outbound update checks on this air-gapped host)'
+}
+
 Write-Host ''
 Write-Note 'Offline note: onboarding may warn about channels, skills, search, plugins and updates. Those need internet and are expected to fail here; local chat is unaffected.'
 
@@ -464,7 +490,7 @@ if (-not $configureProvider) {
         // SecretRef: read from this environment variable at runtime.
         // Delete this line if your endpoint needs no key.
         apiKey: { source: "env", provider: "default", id: "LLM_KEY" },
-        models: [ { id: "your-model-id" } ]
+        models: [ { id: "your-model-id", name: "your-model-id" } ]
       }
     }
   },
@@ -497,3 +523,6 @@ Write-Host '  2. To pair another client, use the gateway URL/token or the setup 
 Write-Host '  3. If you enable node mode on a client, approve it on this host:'
 Write-Host '       openclaw devices list ; openclaw devices approve <id>'
 Write-Host '       openclaw nodes pending ; openclaw nodes approve <id>'
+Write-Host '  4. To upgrade later, bring a NEW bundle and double-click upgrade.cmd there.'
+Write-Host '     Do not re-run this installer with -Force to upgrade: that wipes the tree'
+Write-Host '     (rescue mode) and cannot roll back a migrated state database.'

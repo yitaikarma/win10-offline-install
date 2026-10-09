@@ -44,7 +44,7 @@
 
 - **目标机用户没有管理员权限**，或至少所有交付物都不得要求提权。
 - 由此确定的形态：
-  - 常驻服务不用 Windows Service，改用 **用户级计划任务**（[Install:417](openclaw-offline/Install-OpenClawOffline.ps1#L417)）。
+  - 常驻服务不用 Windows Service，改用 **用户级计划任务**（[Install:443](openclaw-offline/Install-OpenClawOffline.ps1#L443)）。
   - PATH 只改**用户级**：`[Environment]::SetEnvironmentVariable(..., 'User')`，不碰系统 PATH。
   - 不写 HKLM，不调用任何安装器级系统变更。
 
@@ -58,7 +58,7 @@
 | 局域网模型端点（OpenAI 兼容 HTTP） | `BaseUrl` 通常含版本段，可选 Bearer Key | `http://10.0.0.20:8000/v1`，模型 `qwen3-32b` |
 | 其他内网服务 ❓ | 未知，需要时登记 | — |
 
-- 端点探活方式：`GET <BaseUrl>/models`；**并非所有服务都暴露该路由，探测失败不视为安装失败**（[Install:337-351](openclaw-offline/Install-OpenClawOffline.ps1#L337-L351)）。
+- 端点探活方式：`GET <BaseUrl>/models`；**并非所有服务都暴露该路由，探测失败不视为安装失败**（[Install:354-368](openclaw-offline/Install-OpenClawOffline.ps1#L354-L368)）。
 - 密钥处理：**不落明文配置**，走环境变量 + SecretRef（`{ source: "env", provider: "default", id: "LLM_KEY" }`）。
 
 ### 2.4 运行时与工具的存在性
@@ -66,7 +66,7 @@
 | 组件 | 目标机上是否已存在 | 约束 |
 | --- | --- | --- |
 | Node.js | **已有**，由 **nvm-windows** 管理 | 版本必须落在 **>=24.16 且 <25，或 >=26.1**（示例 `26.7.0`）。安装前必须在本 shell 已 `nvm use`（[Install:183-198](openclaw-offline/Install-OpenClawOffline.ps1#L183-L198)） |
-| npm | 随 Node 提供 | **11.16+ 出现 `--allow-scripts` 策略，但 11.x 默认只警告、依赖脚本仍会执行；默认拒绝是 npm 12.0.0 起**。脚本对两者都传 `--allow-scripts`，故 12.x 必需、11.x 无害（[Install:241](openclaw-offline/Install-OpenClawOffline.ps1#L241)） |
+| npm | 随 Node 提供 | **11.16+ 出现 `--allow-scripts` 策略，但 11.x 默认只警告、依赖脚本仍会执行；默认拒绝是 npm 12.0.0 起**。脚本对两者都传 `--allow-scripts`，故 12.x 必需、11.x 无害（[Install:258](openclaw-offline/Install-OpenClawOffline.ps1#L258)） |
 | `robocopy.exe` | 系统自带 | 可放心使用；**退出码 >= 8 才算失败** |
 | `curl.exe` | 不保证 | 仅构建侧依赖（Win10 1803+ 自带） |
 
@@ -77,7 +77,7 @@
 - **安装根**：单一目录，默认 `C:\OpenClaw`；包内目录名固定（`app\`、`docs\`、`npm-cache\`），**不可重命名**。
 - **配置与日志**：集中在用户目录，如 `%USERPROFILE%\.openclaw\openclaw.json`、`%USERPROFILE%\.openclaw\logs`。
 - **监听约定**：本地服务默认绑 **loopback**，端口取高位（Gateway 用 `18789`，`ws://127.0.0.1:18789`）。
-- **传输介质**：U 盘/移动硬盘。**文件会带 MOTW，安装前必须 `Get-ChildItem -Recurse | Unblock-File`**（[Make:468](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L468)）。
+- **传输介质**：U 盘/移动硬盘。**文件会带 MOTW，安装前必须 `Get-ChildItem -Recurse | Unblock-File`**（[Make:516](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L516)）。
 - **体积敏感**：预构建 app 树实测 **574 MB（2026.9.5）/ 730 MB（2026.9.9）**；升级包另需 tarball（~114 MB）与预热 npm cache，升级期间磁盘峰值（stage + 救援整树）可能到 ~1.5 GB。拷贝前应能删掉 `_download\` 中间产物。
 - 磁盘余量、内存、机器名/序列号 ❓ 未记录。
 
@@ -107,23 +107,30 @@
 │   ├── app\                     预构建应用树
 │   ├── npm-cache\               可选：npm 缓存，供目标机自行 --offline 安装
 │   ├── node\                    可选：便携 Node win-x64
+│   ├── <组件>-<版本>.tgz         可升级组件：升级用的 release artifact 本体
 │   ├── docs\                    离线文档（必须！目标机读不到线上文档）
 │   ├── bundle-manifest.json     版本 + SHA256 + 文件数/字节数（schemaVersion）
+│   ├── UPGRADE.md / UPGRADE-BRIEF.md  可升级组件：方案与目标机执行说明
 │   └── README.txt               面向目标机操作者的复制粘贴说明
 ├── Make-<组件>OfflineBundle.ps1 构建侧：联网打包
 ├── Install-<组件>Offline.ps1    目标机：离线安装
-└── install.cmd                  目标机：双击入口（纯 ASCII）
+├── install.cmd                  目标机：双击入口（纯 ASCII）
+├── Upgrade-<组件>Offline.ps1    目标机：离线升级（可升级组件才有）
+├── upgrade.cmd                  目标机：升级双击入口（纯 ASCII）
+└── Test-<组件>Scripts.ps1       构建侧：交付前预检（语法/ASCII/CRLF/锚点）
 ```
 
 ### 3.2 硬性要求
 
-1. **完整性**：每个外部下载物都记录 SHA256 并在安装前校验，不匹配即中止（Node zip 还必须比对官方 `SHASUMS256.txt`）。
+1. **完整性**：每个外部下载物都记录 SHA256 并在安装前校验，不匹配即中止（Node zip 还必须比对官方 `SHASUMS256.txt`）。预构建应用树也必须在目标机复制后比对 manifest 的 `appFileCount`/`appBytes`——它是体积最大、最容易被 U 盘损坏的载荷。
 2. **可续跑**：下载支持断点续传与重试；打包与安装都幂等，已完成的目录被识别复用，而不是重下或清空。
-3. **不可误删**：清理逻辑必须能识别"这是我自己上次的产物"，否则拒绝执行，需显式 `-Force`；拒绝把盘根当输出目录。
+3. **不可误删**：清理逻辑必须能识别"这是我自己上次的产物"，否则拒绝执行，需显式 `-Force`；拒绝把盘根当输出目录（安装侧同样拒绝盘根与系统目录作为 `-InstallRoot`）。
 4. **零残留**：除输出目录/安装目录外不得留下状态目录、全局 npm 前缀、计划任务；脚本自身做前后快照比对。
-5. **可诊断**：`bundle-manifest.json` 记录版本、构建时间、构建架构、npm 版本、文件数与总字节数。
+5. **可诊断**：`bundle-manifest.json` 记录版本、构建时间、构建架构、npm 版本、文件数与总字节数；可升级组件还要记录 release artifact 名与 SHA256、以及该构建声明的 DB schema 版本。
 6. **边界声明**：明确写出"离线时会失败、属预期"的功能，避免被当成故障。
-7. **面向人**：一个纯 ASCII 的 `.cmd` 双击入口，内置前置检查（如 node 是否在 PATH）与清晰错误提示。
+7. **面向人**：一个纯 ASCII 的 `.cmd` 双击入口，内置前置检查（如 node 是否在 PATH）与清晰错误提示；破坏性操作（升级）要有确认提示。
+8. **可升级**：升级走官方 updater + 本地 artifact，包内必须同时带 **release tarball + 预热 npm cache**（tarball 不含传递依赖，官方也没有离线模式）；升级脚本必须"先备份、后停服、再预演"，并明确写出**回滚方式**。
+9. **交付前预检**：`Test-<组件>Scripts.ps1` 必须全绿再打包——它检查 PS 5.1 语法面（含 `Join-Path` 参数个数）、脚本纯 ASCII + CRLF、以及 README 行号锚点是否仍然自洽。
 
 ### 3.3 两种打包模式（跨平台相关的分界）
 
@@ -154,6 +161,8 @@
 | 10 | 从 U 盘拷来的文件带 MOTW，执行被拦 | 安装前 `Unblock-File` |
 | 11 | `Join-Path` 传三个及以上位置参数（多段拼接） | 这是 PS 6.0+ 的 `-AdditionalChildPath`；PS 5.1 报"找不到接受实际参数…的位置形式参数"，在 `$ErrorActionPreference='Stop'` 下**直接终止脚本**。必须嵌套：`Join-Path (Join-Path $a 'b') $c` |
 | 12 | 用户级 PATH 直接 `-notcontains` 去重 | 带尾分隔符/大小写不同的同一路径会被重复追加；应先 `TrimEnd('\')` 再比较（`-contains` 本身不区分大小写），并且没变化时不要回写 |
+| 13 | 脚本用 LF-only 行尾交付 | `.cmd` 在 cmd.exe 下是已知风险，`.ps1` 也不该与仓库约定不一致；用 `.gitattributes`（`*.ps1`/`*.cmd` → `eol=crlf`）固定，并由预检脚本校验 |
+| 14 | 升级/回滚当成"换回旧包" | 升级会把状态库 schema 前向迁移，旧构建随后**拒绝打开**（实测 9.5 的 17 → 9.9 的 19）。回滚只能靠升级前的 `openclaw backup create` 归档 |
 
 ---
 
@@ -161,20 +170,22 @@
 
 | 包 | 覆盖内容 | 目标机入口 | 状态 |
 | --- | --- | --- | --- |
-| [openclaw-offline](openclaw-offline/) | OpenClaw CLI + Gateway（计划任务，端口 18789），可选便携 Node。不含桌面端与 WebView2，界面走浏览器 Control UI | [install.cmd](openclaw-offline/install.cmd) | 脚本完整，未见构建产物或实机验证记录；**升级方案见 [UPGRADE.md](openclaw-offline/UPGRADE.md)**，目标机执行用 [UPGRADE-BRIEF.md](openclaw-offline/UPGRADE-BRIEF.md) |
+| [openclaw-offline](openclaw-offline/) | OpenClaw CLI + Gateway（计划任务，端口 18789），可选便携 Node。不含桌面端与 WebView2，界面走浏览器 Control UI | 安装 [install.cmd](openclaw-offline/install.cmd) / 升级 [upgrade.cmd](openclaw-offline/upgrade.cmd) | 脚本完整，未见构建产物或实机验证记录；**升级方案见 [UPGRADE.md](openclaw-offline/UPGRADE.md)**，目标机执行用 [UPGRADE-BRIEF.md](openclaw-offline/UPGRADE-BRIEF.md)，交付前预检 [Test-OpenClawOfflineScripts.ps1](openclaw-offline/Test-OpenClawOfflineScripts.ps1) |
 
-`openclaw-offline` 的细节（参数、配对流程、provider 模板）见脚本头部注释；它是第 2、3、4 节规范的**参考实现**，新增包时可以照抄结构。
+`openclaw-offline` 的细节（参数、配对流程、provider 模板）见脚本头部注释；它是第 2、3、4 节规范的**参考实现**，新增包时可以照抄结构。可升级组件的完整模式（构建侧产物、目标机升级流程、失败与回滚矩阵）见 [UPGRADE.md](openclaw-offline/UPGRADE.md)。
 
 ---
 
 ## 6. 新增一个离线包
 
 1. 对照第 2 节确认机器约束是否有变化；新依赖若带原生二进制，先确认架构与 Node 版本窗口。
-2. 建 `<组件>-offline/`，按 3.1 布局写两个 PowerShell 脚本 + 一个 ASCII `.cmd`。
-3. 全部下载物落 SHA256 进 manifest；安装前校验。
+2. 建 `<组件>-offline/`，按 3.1 布局写 PowerShell 脚本 + 纯 ASCII `.cmd` 双击入口。
+3. 全部下载物落 SHA256 进 manifest；安装前校验；预构建树还要在目标机复制后比对文件数与字节数。
 4. 实现幂等与续跑：部分完成的目录要能被识别复用。
 5. 把该组件在气隙下的**能力边界**写进 `README.txt` 与安装脚本尾部输出。
-6. 补第 4 节表格里新踩到的坑。
-7. 把新包登记进第 5 节表格。
+6. 若该组件需要升级：按 3.2 第 8 条带 release tarball + 预热 cache，写 `Upgrade-<组件>Offline.ps1` 与 `upgrade.cmd`，流程与回滚声明照 [UPGRADE.md](openclaw-offline/UPGRADE.md) 的模式。
+7. 写 `<组件>` 的预检脚本（可复制 `Test-OpenClawOfflineScripts.ps1` 的检查项），**全绿再打包**。
+8. 补第 4 节表格里新踩到的坑。
+9. 把新包登记进第 5 节表格。
 
 > 未在本仓库做过实机验证的结论，请在文档里明确标注为推断，不要写成既成事实。

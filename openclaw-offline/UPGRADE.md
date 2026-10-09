@@ -234,31 +234,39 @@ openclaw backup restore <archive> --target <空目录>   # 回滚：本次唯一
 
 ## 6. 产物与脚本改动清单
 
-### 6.1 Make 侧（构建）
+### 6.1 Make 侧（已实现）
 
 | 改动 | 说明 |
 | --- | --- |
 | 新增 `npm pack openclaw@<ver>` | 产出 `openclaw-<ver>.tgz`，记录 SHA256 进 manifest（`packagedTarball` / `tarballSha256`） |
 | 新增"预热 cache" | 构建时以同一 `--cache` 目录安装目标版本，天然含全部传递依赖；升级包携带该 cache |
 | 保留整树产物 | 作为救援/重装通道（**不含回滚**：跨 schema 后旧包无法启动，见 §2.8） |
-| manifest `schemaVersion` 递增 | 新增 tarball 字段；老 bundle 仍可被新安装脚本读取 |
+| manifest `schemaVersion` 递增 | 已改为 4：新增 `packagedTarball`/`tarballSha256`/`schemaVersions`；老 bundle 仍可被新安装脚本读取 |
 | 携带 `UPGRADE-BRIEF.md` | 把目标机 AI 交接说明放进包根，随 U 盘一起到目标机（无外网，必须自带背景） |
-| README.txt | 增加"升级"段：tarball 路径、cache 路径、`update.checkOnStart=false` |
+| README.txt | 增加"升级"段：tarball 路径、cache 路径、回滚只靠备份 |
 
-### 6.2 新增 `Upgrade-OpenClawOffline.ps1`
+### 6.2 `Upgrade-OpenClawOffline.ps1`（已实现）
 
-- 参数：`-BundleDir`、`-InstallRoot`（默认 `C:\OpenClaw`）、`-TargetVersion`/`-Tag`、`-RescueTree`（走整树替换）、`-Force`、`-DryRun`。
-- 流程即 §5；内置"9.5 第一跳"分支（当前版本 < 9.6 时强制走"先停服并等待退出"）。
-- 失败提示使用官方信号：`openclaw update status --json` 的 `registry.reason`（`selector_missing`/`selector_query_failed`/`exact_package_mismatch`/`unsupported_git_channel`）`[文档]` `docs/cli/update/status-and-history.md:82-86`。
-- PowerShell 5.1 约束沿用现有脚本：不加 `Join-Path` 第三参、不做出网假设、`Invoke-Native` 包裹原生命令。
+- 参数：`-BundleDir`、`-InstallRoot`（默认 `C:\OpenClaw`）、`-BackupDir`（默认 `C:\Backups\openclaw`）、`-GatewayPort`、`-SkipBackup`、`-DryRun`（只做预演）、`-RescueTree`（整树替换兜底）、`-Force`。
+- 流程即 §5：校验 bundle 与 artifact 哈希 → 版本与 schema 对比 → 备份（`backup create --output <目录> --verify`，并校验归档确实生成）→ 停 Gateway 并等待无 node 进程 → dry-run 闸门 → 正式 `update --tag <tgz>` → `gateway install --force` → `gateway restart` → `doctor --post-upgrade` 等验证 → 打印回滚命令。
+- 失败时用官方信号给处置建议：`global-install-foreign-destination`/无 owner、`ENOTCACHED`、`node-runtime-preflight`、`newer schema version`、`EPERM/EBUSY/EACCES`。
+- 预演失败也会**把 Gateway 起回来**再退出，不让机器停在那；`-DryRun` 走完预演后同样恢复服务。
+- `upgrade.cmd` 提供双击入口，破坏性操作前要求输入 `YES` 确认。
+- PowerShell 5.1 约束沿用现有脚本：不加 `Join-Path` 第三参、不做出网假设、`Invoke-Native` 包裹原生命令、纯 ASCII 输出。
 
-### 6.3 安装侧（一次性）
+### 6.3 安装侧（已实现）
 
-| 改动 | 说明 |
+| 改动 | 状态 |
 | --- | --- |
-| 首次安装写入 `update.checkOnStart=false` | 气隙机不再做每日出网检查 |
-| 让安装树"有主" | 用户级 `npm config set prefix <InstallRoot>\app`，或仅在升级调用时用 `NPM_CONFIG_PREFIX`（更小副作用，推荐后者） |
-| 标注救援模式 | 现有 `-Force` 整树重装路径改称"救援/回滚"，不再作为常规升级方式 |
+| 首次安装写入 `update.checkOnStart=false` | 已实现：安装脚本在配置校验后执行；失败仅告警，可用 `OPENCLAW_NO_AUTO_UPDATE=1` 兜底 |
+| 让安装树"有主" | 已实现于升级脚本：调用 updater 前注入 `NPM_CONFIG_PREFIX=<InstallRoot>\app`，不改用户 npm 配置 |
+| 标注救援模式 | 已实现：`-Force` 的报错信息改为指路 `Upgrade-OpenClawOffline.ps1`，并注明 `-Force` 是救援重装 |
+| 应用树完整性校验 | 已实现：复制后比对 manifest 的 `appFileCount`/`appBytes`，不符即中止（旧 manifest 缺字段时跳过） |
+| provider 模板补 `models[].name` | 已实现：零参数安装路径最后那一步 `config patch` 现在能通过 schema 校验 |
+
+### 6.4 交付前预检（已实现）
+
+`Test-OpenClawOfflineScripts.ps1`：解析全部 `.ps1`、校验 PS 5.1 语法面（`Join-Path` 位置参数 ≤ 2、无 PS 6/7 专有写法）、校验脚本纯 ASCII + CRLF、复核 README 全部 `#L` 锚点的标签与目标一致且不越界。退出码 0 才允许打包。
 
 ---
 
