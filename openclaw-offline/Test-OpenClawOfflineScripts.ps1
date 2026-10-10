@@ -51,6 +51,15 @@ function Assert-Match([string]$Name, [string]$Pattern, [string]$Label) {
     if ($text -notmatch $Pattern) { Fail "$Label - $Name does not match /$Pattern/" } else { Pass $Label }
 }
 
+# ... and that it does NOT contain one (guards against Windows-only assumptions creeping
+# back into a script that must also run on a Unix build host in npmcache mode).
+function Assert-NotMatch([string]$Name, [string]$Pattern, [string]$Label) {
+    $path = Join-Path $bundleDir $Name
+    if (-not (Test-Path $path)) { Fail "$Label - missing file $Name"; return }
+    $text = Get-Content -Path $path -Raw
+    if ($text -match $Pattern) { Fail "$Label - $Name still matches /$Pattern/" } else { Pass $Label }
+}
+
 $bundleDir = $PSScriptRoot
 $ps1Files = @(Get-ChildItem -Path $bundleDir -Filter '*.ps1' -File | Sort-Object Name)
 $cmdFiles = @(Get-ChildItem -Path $bundleDir -Filter '*.cmd' -File | Sort-Object Name)
@@ -141,13 +150,13 @@ foreach ($file in $deliverables) {
 # and update this table in the same change.
 $anchorExpectations = @{
     'Install:176-177' = 'PROCESSOR_ARCHITEW6432'
-    'Make:283-285'    = 'OSArchitecture'
+    'Make:311-313'    = 'OSArchitecture'
     'Install:532'     = 'Installing the Gateway service'
     'Install:443-457' = 'CheckEndpoint'
     'Install:211-226' = 'Checking the Node runtime'
     'Install:286'     = 'needAllow'
     'Make:20-22'      = 'build on Windows x64'
-    'Make:738'        = 'Unblock-File'
+    'Make:769'        = 'Unblock-File'
     'Install:158-172' = 'Get-Prop \$manifest'
 }
 
@@ -205,6 +214,15 @@ Assert-Match 'Install-OpenClawOffline.ps1' 'installScriptPackages' 'install uses
 # Native platform packages: recorded by make, asserted by install.
 Assert-Match 'Make-OpenClawOfflineBundle.ps1' 'nativePackages' 'make records the native package list'
 Assert-Match 'Install-OpenClawOffline.ps1' 'nativePackages' 'install verifies the native package list'
+
+# Cross-platform readiness: npmcache mode must build on a Unix host, so the Windows-only
+# environment variables must not be read directly (they are null there, and Join-Path on a
+# null -Path is a terminating binding error).
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' '\$hostOsLabel\s*=' 'make resolves a cross-platform host label'
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' '\$residueHome\s*=' 'make resolves a cross-platform home directory'
+Assert-NotMatch 'Make-OpenClawOfflineBundle.ps1' 'Join-Path \$env:USERPROFILE' 'make never builds a path from $env:USERPROFILE (null on Unix)'
+Assert-NotMatch 'Make-OpenClawOfflineBundle.ps1' 'Join-Path \$env:APPDATA' 'make never builds a path from $env:APPDATA (null on Unix)'
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' 'Invoke-NpmRetry' 'make retries npm installs (flaky or proxied build links)'
 
 # ---------------------------------------------------------------- README anchors
 Section 'README line anchors'

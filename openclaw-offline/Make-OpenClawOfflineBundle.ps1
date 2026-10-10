@@ -74,6 +74,13 @@ $NodeAltFloor        = '26.1.0'
 $NodeKnownGood       = '>=24.16 <25 or >=26.1'
 $DefaultGatewayPort  = 18789
 
+# Windows exposes USERPROFILE/APPDATA and sets OS=Windows_NT; a Unix build host does not.
+# npmcache mode is buildable on any platform, so resolve these once instead of reading the
+# Windows-only variables directly (a null -Path makes Join-Path a terminating error).
+$hostOsLabel    = if ($env:OS) { $env:OS } else { 'Unix' }
+$residueHome    = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($HOME) { $HOME } else { (Get-Location).Path }
+$residueAppData = if ($env:APPDATA) { $env:APPDATA } else { $residueHome }
+
 # Windows PowerShell 5.1 does not reliably negotiate TLS 1.2, which makes HTTPS
 # downloads fail with "Could not create SSL/TLS secure channel".
 try {
@@ -195,6 +202,27 @@ function Invoke-Download {
     throw "Download failed after $Attempts attempts: $Url"
 }
 
+# npm's own retries are too small for a ~300 MB dependency download on a flaky or proxied
+# link: a reset halfway through aborts the whole bundle build. Every install/pack step goes
+# through this loop; npm's cache is content-addressed, so a retry resumes where it stopped.
+function Invoke-NpmRetry {
+    param(
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [int]$Attempts = 3
+    )
+    $run = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $run = Invoke-Native -Command 'npm' -Arguments $Arguments -Show
+        if ($run.ExitCode -eq 0) { return $run }
+        if ($attempt -lt $Attempts) {
+            $wait = $attempt * 5
+            Write-Note "npm attempt $attempt/$Attempts failed (exit $($run.ExitCode)); retrying in ${wait}s"
+            Start-Sleep -Seconds $wait
+        }
+    }
+    return $run
+}
+
 # robocopy exists only on Windows, and npmcache mode also runs on Unix, so every tree
 # copy goes through this dispatcher. It keeps robocopy's exit-code contract (>= 8 means
 # failure) so the callers read the same way on both platforms.
@@ -266,8 +294,8 @@ function Get-ResidueSnapshot {
     $tasks = 0
     try { $tasks = @(Get-ScheduledTask -TaskName '*openclaw*' -ErrorAction SilentlyContinue).Count } catch { $tasks = -1 }
     [pscustomobject]@{
-        OpenClawState = (Test-Path (Join-Path $env:USERPROFILE '.openclaw'))
-        NpmGlobalDir  = (Test-Path (Join-Path $env:APPDATA 'npm'))
+        OpenClawState = (Test-Path (Join-Path $residueHome '.openclaw'))
+        NpmGlobalDir  = (Test-Path (Join-Path $residueAppData 'npm'))
         OpenClawTasks = $tasks
     }
 }
@@ -301,7 +329,7 @@ if ($crossWarm) {
     Write-Note "Cross-warming $TargetPlatform on a non-Windows-x64 host: npm gets --os win32 --cpu x64 --force --ignore-scripts."
     Write-Note 'The dependency install scripts are left to the target host, which is win32-x64.'
 }
-Write-Ok "Host: $($env:OS) $arch, PowerShell $($PSVersionTable.PSVersion), mode $Mode"
+Write-Ok "Host: $hostOsLabel $arch, PowerShell $($PSVersionTable.PSVersion), mode $Mode"
 
 foreach ($exe in @('node', 'npm')) {
     if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) {
@@ -323,13 +351,13 @@ $needAllowScripts = ([int]$Matches[1] -gt 11) -or ([int]$Matches[1] -eq 11 -and 
 Write-Ok "Local npm $npmVerRaw (needs --allow-scripts: $needAllowScripts)"
 
 $residueBefore = Get-ResidueSnapshot
-Write-Ok "Baseline: .openclaw=$($residueBefore.OpenClawState), `$env:APPDATA\npm=$($residueBefore.NpmGlobalDir), openclaw tasks=$($residueBefore.OpenClawTasks)"
+Write-Ok "Baseline: .openclaw=$($residueBefore.OpenClawState), npm-global-dir=$($residueBefore.NpmGlobalDir), openclaw tasks=$($residueBefore.OpenClawTasks)"
 
 # ---------------------------------------------------------------- resolve versions
 Write-Step 'Resolving versions'
 
 if ($OpenClawVersion -eq 'latest') {
-    $viewProbe = Invoke-Native -Command 'npm' -Arguments @('view', $OpenClawPackage, 'version')
+    $viewProbe = Invoke-NpmRetry -Arguments @('view', $OpenClawPackage, 'version')
     $resolvedOpenClaw = "$($viewProbe.Lines | Select-Object -Last 1)".Trim()
 } else {
     $resolvedOpenClaw = $OpenClawVersion
@@ -436,7 +464,7 @@ if (($alreadyVersion -eq $resolvedOpenClaw) -and (Test-Path $appMarker)) {
         $npmArgs += "--allow-scripts=$OpenClawPackage"
     }
     Write-Host "    npm $($npmArgs -join ' ')"
-    $npmRun = Invoke-Native -Command 'npm' -Arguments $npmArgs -Show
+    $npmRun = Invoke-NpmRetry -Arguments $npmArgs
     $npmLines = $npmRun.Lines
     $npmExit = $npmRun.ExitCode
     if ($npmExit -ne 0) { throw "npm install failed with exit code $npmExit" }
@@ -462,7 +490,7 @@ if (($alreadyVersion -eq $resolvedOpenClaw) -and (Test-Path $appMarker)) {
         $allow = (@($OpenClawPackage) + $skipped) -join ','
         $retryArgs = @('install', '-g', "$OpenClawPackage@$resolvedOpenClaw", '--prefix', $stageApp, '--cache', $stageCache, '--no-audit', '--no-fund', "--allow-scripts=$allow")
         Write-Host "    npm $($retryArgs -join ' ')"
-        $retryRun = Invoke-Native -Command 'npm' -Arguments $retryArgs -Show
+        $retryRun = Invoke-NpmRetry -Arguments $retryArgs
         $retryOut = $retryRun.Lines
         $retryExit = $retryRun.ExitCode
         if ($retryExit -ne 0) {
@@ -511,7 +539,7 @@ if (Test-Path $tarballPath) {
 } else {
     $packArgs = @('pack', "$OpenClawPackage@$resolvedOpenClaw", '--cache', $stageCache, '--pack-destination', $bundleRoot)
     Write-Host "    npm $($packArgs -join ' ')"
-    $packRun = Invoke-Native -Command 'npm' -Arguments $packArgs -Show
+    $packRun = Invoke-NpmRetry -Arguments $packArgs
     if ($packRun.ExitCode -ne 0) { throw "npm pack failed with exit code $($packRun.ExitCode)" }
 }
 if (-not (Test-Path $tarballPath)) {
@@ -625,6 +653,9 @@ if ($platformScan.Foreign.Count -gt 0) {
 }
 Write-Ok "platform check: $($nativePackages.Count) $TargetPlatform package(s), no foreign platform packages"
 if ($nativePackages.Count -gt 0) { Write-Host "        $($nativePackages -join ', ')" }
+if ($Mode -eq 'npmcache' -and $nativePackages.Count -eq 0) {
+    Write-Note "No $TargetPlatform platform package was resolved. The cross-warm probably did not pull the win32-x64 optional deps (partial or offline cache?), so the target would install an incomplete tree. Verify against a real build before shipping."
+}
 
 if ($Mode -eq 'npmcache') {
     if ($KeepStaging) {
@@ -694,7 +725,7 @@ if ($null -eq $appBytes) { $appBytes = 0 }
 $manifest = [ordered]@{
     schemaVersion         = $BundleSchemaVersion
     builtAtUtc            = (Get-Date).ToUniversalTime().ToString('o')
-    builtOn               = "$(if ($env:OS) { $env:OS } else { 'Unix' }) $arch"
+    builtOn               = "$hostOsLabel $arch"
     mode                  = $Mode
     targetPlatform        = $TargetPlatform
     openClawVersion       = $installedVersion
@@ -776,8 +807,8 @@ Write-Host 'Copy the folder (not the top-level folder itself into _download) to 
 Write-Step 'Residue check'
 $residueAfter = Get-ResidueSnapshot
 $findings = @()
-if (-not $residueBefore.OpenClawState -and $residueAfter.OpenClawState) { $findings += "$env:USERPROFILE\.openclaw was created" }
-if (-not $residueBefore.NpmGlobalDir -and $residueAfter.NpmGlobalDir) { $findings += "$env:APPDATA\npm was created" }
+if (-not $residueBefore.OpenClawState -and $residueAfter.OpenClawState) { $findings += "$residueHome\.openclaw was created" }
+if (-not $residueBefore.NpmGlobalDir -and $residueAfter.NpmGlobalDir) { $findings += "$residueAppData\npm was created" }
 if ($residueAfter.OpenClawTasks -ge 0 -and $residueBefore.OpenClawTasks -ge 0 -and $residueAfter.OpenClawTasks -gt $residueBefore.OpenClawTasks) {
     $findings += 'an openclaw scheduled task was created'
 }
