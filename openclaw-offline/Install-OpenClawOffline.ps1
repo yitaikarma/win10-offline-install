@@ -69,6 +69,18 @@ Set-StrictMode -Version Latest
 # Everything else in this script stays inside the 5.1 surface on purpose (no ??,
 # ?:, -AsHashtable, Get-Error or $IsWindows).
 
+# ---------------------------------------------------------------- contract
+# Shared contract with Make-*/Upgrade-*/Test-*. Test-OpenClawOfflineScripts.ps1 asserts
+# the files still agree; silent drift here is what breaks an air-gapped install.
+$OpenClawPackage     = 'openclaw'
+$BundleSchemaVersion = 4
+$ManifestSchemaMin   = 2
+$TargetPlatform      = 'win32-x64'
+# Supported Node window (openclaw's own engines field): >=24.16 <25 OR >=26.1.
+$NodeFloor           = '24.16.0'
+$NodeCeiling         = '25.0.0'
+$NodeAltFloor        = '26.1.0'
+
 function Write-Step([string]$Text) { Write-Host "`n==> $Text" -ForegroundColor Cyan }
 function Write-Ok([string]$Text)   { Write-Host "    OK  $Text" -ForegroundColor Green }
 function Write-Note([string]$Text) { Write-Host "    !!  $Text" -ForegroundColor Yellow }
@@ -122,6 +134,22 @@ $BundleDir = [System.IO.Path]::GetFullPath($BundleDir)
 $manifestPath = Join-Path $BundleDir 'bundle-manifest.json'
 if (-not (Test-Path $manifestPath)) { throw "bundle-manifest.json not found in $BundleDir" }
 $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+
+# Refuse a bundle this installer does not understand instead of half-installing it.
+$manifestSchema = Get-Prop $manifest 'schemaVersion'
+if ($null -ne $manifestSchema) {
+    if ([int]$manifestSchema -gt $BundleSchemaVersion) {
+        throw "Unsupported manifest schemaVersion $manifestSchema (this installer understands $BundleSchemaVersion). Use the installer from that bundle."
+    }
+    if ([int]$manifestSchema -lt $ManifestSchemaMin) {
+        throw "Manifest schemaVersion $manifestSchema is too old (minimum $ManifestSchemaMin). Rebuild the bundle."
+    }
+    if ([int]$manifestSchema -lt $BundleSchemaVersion) {
+        Write-Note "Older bundle schemaVersion $manifestSchema (current is $BundleSchemaVersion); continuing with compatibility defaults."
+    }
+} else {
+    Write-Note 'The manifest has no schemaVersion; treating it as a legacy bundle.'
+}
 
 $appStage   = Join-Path $BundleDir 'app'
 $cacheStage = Join-Path $BundleDir 'npm-cache'
@@ -190,7 +218,7 @@ $nodeProbe = Invoke-Native -Command 'node' -Arguments @('-v')
 $nodeRaw = "$($nodeProbe.Lines | Select-Object -Last 1)".Trim()
 if ($nodeRaw -notmatch '^v(\d+)\.(\d+)\.(\d+)') { throw "Unrecognized Node version: $nodeRaw" }
 $nodeVer = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
-$nodeOk = (($nodeVer -ge [version]'24.16.0' -and $nodeVer -lt [version]'25.0.0') -or ($nodeVer -ge [version]'26.1.0'))
+$nodeOk = (($nodeVer -ge [version]$NodeFloor -and $nodeVer -lt [version]$NodeCeiling) -or ($nodeVer -ge [version]$NodeAltFloor))
 if (-not $nodeOk) {
     throw "Node $nodeRaw is outside the supported range (need >=24.16 <25, or >=26.1). Fix with: nvm install 26.7.0 ; nvm use 26.7.0"
 }
@@ -256,15 +284,76 @@ if ($mode -eq 'app') {
     $npmRaw = "$($npmProbe.Lines | Select-Object -Last 1)".Trim()
     if ($npmRaw -notmatch '^(\d+)\.(\d+)') { throw "Unrecognized npm version: $npmRaw" }
     $needAllow = ([int]$Matches[1] -gt 11) -or ([int]$Matches[1] -eq 11 -and [int]$Matches[2] -ge 16)
-    $npmArgs = @('install', '-g', "openclaw@$($manifest.openClawVersion)", '--prefix', $appDir,
+    $npmArgs = @('install', '-g', "$OpenClawPackage@$($manifest.openClawVersion)", '--prefix', $appDir,
                  '--cache', $cacheDir, '--offline', '--no-audit', '--no-fund')
-    if ($needAllow) { $npmArgs += '--allow-scripts=openclaw' }
+    # Pin the platform so the resolution matches the cache the build host warmed.
+    if ("$(Get-Prop $manifest 'targetPlatform')" -eq 'win32-x64') { $npmArgs += @('--os', 'win32', '--cpu', 'x64') }
+    if ($needAllow) {
+        # npm >=11.16 needs every package with an install script named, and npm 12 denies
+        # dependency scripts by default. Make records the list it discovered; without it
+        # the native deps (koffi, esbuild, tree-sitter-bash...) stay unbuilt.
+        $scriptPkgs = @(Get-Prop $manifest 'installScriptPackages')
+        $scriptPkgs = @($scriptPkgs | Where-Object { $_ })
+        if ($scriptPkgs.Count -eq 0) { $scriptPkgs = @($OpenClawPackage) }
+        $npmArgs += "--allow-scripts=$($scriptPkgs -join ',')"
+        Write-Host "    install scripts allowed for: $($scriptPkgs -join ', ')"
+    }
     Write-Host "    npm $($npmArgs -join ' ')"
     $npmRun = Invoke-Native -Command 'npm' -Arguments $npmArgs -Show
     if ($npmRun.ExitCode -ne 0) {
         throw "Offline npm install failed (exit $($npmRun.ExitCode)). The cache may be incomplete for this npm/Node combination - retry without --offline only if this host can reach the registry."
     }
+    if (@($npmRun.Lines | Where-Object { "$_" -match 'install-scripts\s+@?[^\s(]+\s*\(' }).Count -gt 0) {
+        Write-Note 'npm did not run some install scripts on the first pass; re-running with the full list.'
+    }
+    $skipped = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $npmRun.Lines) {
+        if ("$line" -match 'install-scripts\s+(@?[^\s(]+)\s*\(') {
+            $pkg = $Matches[1]
+            $at = $pkg.LastIndexOf('@')
+            if ($at -gt 0) { $pkg = $pkg.Substring(0, $at) }
+            if ($pkg -and -not $skipped.Contains($pkg)) { $skipped.Add($pkg) }
+        }
+    }
+    if ($skipped.Count -gt 0) {
+        # npm named the packages whose install scripts it did not run. Run once more with
+        # the full list so the native bits (koffi, esbuild, tree-sitter-bash...) land.
+        $retryArgs = @($npmArgs | Where-Object { "$_" -notlike '--allow-scripts=*' })
+        $retryArgs += "--allow-scripts=$((@($OpenClawPackage) + $skipped) -join ',')"
+        Write-Host "    npm $($retryArgs -join ' ')"
+        $retryRun = Invoke-Native -Command 'npm' -Arguments $retryArgs -Show
+        if ($retryRun.ExitCode -ne 0) {
+            throw "The offline install re-run with the full --allow-scripts list failed (exit $($retryRun.ExitCode))."
+        }
+        if (@($retryRun.Lines | Where-Object { "$_" -match 'install-scripts\s+@?[^\s(]+\s*\(' }).Count -gt 0) {
+            throw 'npm still reports install scripts it did not run. The native dependencies would be incomplete - use the app-mode bundle built on Windows x64 instead.'
+        }
+        Write-Ok "install scripts covered: $((@($OpenClawPackage) + $skipped) -join ', ')"
+    }
     Write-Ok 'openclaw installed from cache'
+}
+
+# Architecture-bound packages the build recorded must be present in the installed tree: a
+# missing one means the tree was resolved for another platform, which an air-gapped host
+# cannot repair. npm hoists some deps and nests others, so match either layout.
+$nativeList = @(Get-Prop $manifest 'nativePackages')
+$nativeList = @($nativeList | Where-Object { $_ })
+if ($nativeList.Count -gt 0) {
+    $nmRoot = Join-Path $appDir 'node_modules'
+    $allDirs = @(Get-ChildItem -Path $nmRoot -Recurse -Directory -Force -ErrorAction SilentlyContinue |
+                 ForEach-Object { ($_.FullName.Substring($nmRoot.Length).TrimStart('\') -replace '\\', '/') })
+    $missing = New-Object System.Collections.Generic.List[string]
+    foreach ($pkg in $nativeList) {
+        $hit = $false
+        foreach ($rel in $allDirs) {
+            if ($rel -eq $pkg -or $rel.EndsWith("/node_modules/$pkg")) { $hit = $true; break }
+        }
+        if (-not $hit) { $missing.Add("$pkg") }
+    }
+    if ($missing.Count -gt 0) {
+        throw "Missing $TargetPlatform package(s) after install: $($missing -join ', '). The bundle was built for the wrong platform, or the media is damaged. Do not use this installation."
+    }
+    Write-Ok "native packages verified: $($nativeList.Count) present"
 }
 
 if ($nodeBundled) {

@@ -15,7 +15,12 @@
          - no PS 6/7-only syntax or cmdlets
       3. deliverables are ASCII (the target console is read in the OEM code page)
          and use CRLF line endings (LF-only .cmd files are a known cmd.exe risk)
-      4. every README #L anchor matches its own label and stays inside the file
+      4. every README #L anchor matches its own label, its content contract and stays
+         inside the file
+      5. the cross-file contract still holds: the manifest schema version, the npm
+         package name, the Node window, the gateway port, the bundle's carry list and
+         the .cmd wiring must agree across Make/Install/Upgrade/Test. Silent drift here
+         is what breaks an air-gapped install months later.
 
     Exit code 0 = all checks passed; 1 = at least one failure.
 
@@ -37,6 +42,14 @@ $failures = New-Object System.Collections.Generic.List[string]
 function Fail([string]$Message) { $script:failures.Add($Message) | Out-Null; Write-Host "    FAIL  $Message" -ForegroundColor Red }
 function Pass([string]$Message) { Write-Host "    ok    $Message" -ForegroundColor Green }
 function Section([string]$Text) { Write-Host "`n==> $Text" -ForegroundColor Cyan }
+
+# Cross-file contract helper: assert that a deliverable still contains a pattern.
+function Assert-Match([string]$Name, [string]$Pattern, [string]$Label) {
+    $path = Join-Path $bundleDir $Name
+    if (-not (Test-Path $path)) { Fail "$Label - missing file $Name"; return }
+    $text = Get-Content -Path $path -Raw
+    if ($text -notmatch $Pattern) { Fail "$Label - $Name does not match /$Pattern/" } else { Pass $Label }
+}
 
 $bundleDir = $PSScriptRoot
 $ps1Files = @(Get-ChildItem -Path $bundleDir -Filter '*.ps1' -File | Sort-Object Name)
@@ -127,17 +140,73 @@ foreach ($file in $deliverables) {
 # the failure this catches. When a script grows or shrinks, recompute the README anchors
 # and update this table in the same change.
 $anchorExpectations = @{
-    'Install:148-149' = 'PROCESSOR_ARCHITEW6432'
-    'Make:188-190'    = 'OSArchitecture'
-    'Install:443'     = 'Installing the Gateway service'
-    'Install:354-368' = 'CheckEndpoint'
-    'Install:183-198' = 'Checking the Node runtime'
-    'Install:258'     = 'needAllow'
+    'Install:176-177' = 'PROCESSOR_ARCHITEW6432'
+    'Make:283-285'    = 'OSArchitecture'
+    'Install:532'     = 'Installing the Gateway service'
+    'Install:443-457' = 'CheckEndpoint'
+    'Install:211-226' = 'Checking the Node runtime'
+    'Install:286'     = 'needAllow'
     'Make:20-22'      = 'build on Windows x64'
-    'Make:516'        = 'Unblock-File'
-    'Install:130-144' = 'Get-Prop \$manifest'
+    'Make:738'        = 'Unblock-File'
+    'Install:158-172' = 'Get-Prop \$manifest'
 }
 
+# ---------------------------------------------------------------- cross-file contract
+Section 'Cross-file contract'
+
+foreach ($name in @('Make-OpenClawOfflineBundle.ps1', 'Install-OpenClawOffline.ps1',
+                    'Upgrade-OpenClawOffline.ps1', 'install.cmd', 'upgrade.cmd',
+                    'UPGRADE.md', 'UPGRADE-BRIEF.md')) {
+    if (Test-Path (Join-Path $bundleDir $name)) { Pass "$name present" } else { Fail "$name present" }
+}
+
+# Manifest schema: one declared value, written by make, understood by install/upgrade.
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' '\$BundleSchemaVersion\s*=\s*4\b' 'make declares manifest schemaVersion 4'
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' 'schemaVersion\s*=\s*\$BundleSchemaVersion' 'make writes the declared schemaVersion'
+Assert-Match 'Install-OpenClawOffline.ps1' '\$BundleSchemaVersion\s*=\s*4\b' 'install understands manifest schemaVersion 4'
+Assert-Match 'Install-OpenClawOffline.ps1' '\[int\]\$manifestSchema -gt \$BundleSchemaVersion' 'install refuses a newer manifest'
+Assert-Match 'Upgrade-OpenClawOffline.ps1' '\$BundleSchemaVersion\s*=\s*4\b' 'upgrade understands manifest schemaVersion 4'
+Assert-Match 'Upgrade-OpenClawOffline.ps1' '\[int\]\$manifestSchema -gt \$BundleSchemaVersion' 'upgrade refuses a newer manifest'
+
+# npm package name.
+foreach ($f in @('Make-OpenClawOfflineBundle.ps1', 'Install-OpenClawOffline.ps1', 'Upgrade-OpenClawOffline.ps1')) {
+    Assert-Match $f "\`$OpenClawPackage\s*=\s*'openclaw'" "$f pins the npm package name"
+}
+
+# Node window (openclaw's engines field).
+foreach ($f in @('Make-OpenClawOfflineBundle.ps1', 'Install-OpenClawOffline.ps1')) {
+    Assert-Match $f "\`$NodeFloor\s*=\s*'24\.16\.0'" "$f records the Node floor"
+    Assert-Match $f "\`$NodeCeiling\s*=\s*'25\.0\.0'" "$f records the Node ceiling"
+    Assert-Match $f "\`$NodeAltFloor\s*=\s*'26\.1\.0'" "$f records the second Node floor"
+}
+
+# Gateway port.
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' '\$DefaultGatewayPort\s*=\s*18789' 'make records the default gateway port'
+Assert-Match 'Install-OpenClawOffline.ps1' '\[int\]\$GatewayPort\s*=\s*18789' 'install defaults to the same gateway port'
+Assert-Match 'Upgrade-OpenClawOffline.ps1' '\[int\]\$GatewayPort\s*=\s*18789' 'upgrade defaults to the same gateway port'
+
+# The bundle must be self-contained: open it and double-click the entry points.
+foreach ($n in @('Install-OpenClawOffline.ps1', 'Upgrade-OpenClawOffline.ps1', 'install.cmd', 'upgrade.cmd')) {
+    Assert-Match 'Make-OpenClawOfflineBundle.ps1' ([regex]::Escape("'$n'")) "make carries $n into the bundle"
+}
+
+# A .cmd must call the script it ships with.
+Assert-Match 'install.cmd' 'Install-OpenClawOffline\.ps1' 'install.cmd calls the installer'
+Assert-Match 'upgrade.cmd' 'Upgrade-OpenClawOffline\.ps1' 'upgrade.cmd calls the upgrade script'
+
+# Cross-platform cache warming: platform pinned, install scripts left to the target.
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' '\$TargetPlatform\s*=\s*.win32-x64.' 'make records the target platform'
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' '--ignore-scripts' 'make skips install scripts while cross-warming'
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' "'--os', 'win32', '--cpu', 'x64'" 'make pins the platform when warming'
+Assert-Match 'Install-OpenClawOffline.ps1' "-eq 'win32-x64'" 'install pins the platform when installing'
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' 'installScriptPackages' 'make records the install-script package list'
+Assert-Match 'Install-OpenClawOffline.ps1' 'installScriptPackages' 'install uses the recorded install-script list'
+
+# Native platform packages: recorded by make, asserted by install.
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' 'nativePackages' 'make records the native package list'
+Assert-Match 'Install-OpenClawOffline.ps1' 'nativePackages' 'install verifies the native package list'
+
+# ---------------------------------------------------------------- README anchors
 Section 'README line anchors'
 $readmePath = Join-Path $RepoRoot 'README.md'
 if (-not (Test-Path $readmePath)) {

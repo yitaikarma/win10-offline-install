@@ -73,15 +73,19 @@ updater 会从 **npm 配置的全局 prefix + 已安装启动器** 推断这个 
 2. **不要删除、不要手工编辑 `%USERPROFILE%\.openclaw`**。不要直接改 SQLite、不要动 `user_version` / `schema_meta.schema_version`。
 3. **绝对不要运行**：`openclaw reset`、`openclaw uninstall`、`openclaw update cleanup`（cleanup 会永久放弃回滚原件）。
 4. **任何"替换文件/升级"动作之前，先停 Gateway 并确认它已经退出**（9.5 没有"安装被替换"监听器，边跑边换文件会失败或半死不活）。
-5. **严格按本文顺序执行**；某一步输出与"期望"不符就**停下来汇报**，不要自行发挥去"修好它"。
-6. **不要执行本文没有列出的修复/清理命令**；不要尝试任何需要网络的命令（如果某条命令卡在等待网络，说明用法错了，停下汇报）。
+5. **严格按本文顺序执行**；某一步输出与"期望"不符就**停下来、把输出记进日志**，不要自行发挥去"修好它"。
+6. **不要执行本文没有列出的修复/清理命令**；不要尝试任何需要网络的命令（如果某条命令卡在等待网络，说明用法错了，停下并记录）。
 7. Shell 是 **Windows PowerShell 5.1**：不要用 `Join-Path` 三参数、`??`、`?.`、`Get-Error`、`$IsWindows` 等 PS 6/7 语法；本机也不要依赖 `curl.exe` 之外的联网工具。
 
 ---
 
 ## 4. 第一阶段任务：只做诊断，**不改动任何东西**（现在就能做，不需要新 U 盘包）
 
-目的：把构建侧还缺的几个事实取回来。逐条执行，**把命令与完整输出原样抄回来（含退出码）**，不要概括。
+目的：把升级要用到的事实**在本机核实并存档**。这台机器与构建侧之间没有回传通道（公司内网、U 盘单向），
+所以**不要等任何外部确认**——结论写进本机文件 `RECON.txt`（放在你自己的工作目录，例如 `C:\Backups\`），
+后续判定全部由第 5 节的脚本闸门给出。
+
+逐条执行，把命令与完整输出（含退出码）原样追加到 `RECON.txt`：
 
 | # | 命令 | 想确认什么 |
 | --- | --- | --- |
@@ -98,11 +102,11 @@ updater 会从 **npm 配置的全局 prefix + 已安装启动器** 推断这个 
 | D11 | `openclaw gateway status --json` | 服务与探测状态（只读） |
 
 补充要求：
-- D6/D7 很可能因为**无外网**而报错或超时，**那是预期**——请把原文与退出码照样抄回来，并注明"是否等了很久"。
-- 如果某条命令报"不是内部或外部命令"或参数不存在（例如 `openclaw database preflight` 在 9.5 上可能没有），也照抄，注明。
+- D6/D7 很可能因为**无外网**而报错或超时，**那是预期**——把原文与退出码照样存档，注明"是否等了很久"。
+- 如果某条命令报"不是内部或外部命令"或参数不存在，也照抄，注明。
 - **本阶段不要运行 `openclaw update`（不带 `--dry-run` 的那种）**，也不要停服务。
 
-**汇报格式**（第一阶段）：
+**存档格式**（`RECON.txt`，给现场和下一次升级用，不是给别人回传的）：
 ```
 D1: <命令>
 输出:
@@ -120,31 +124,54 @@ D1: <命令>
 - 任何与本文"期望"不符之处:
 ```
 
+**自决规则**：上面每条都是只读的，不需要请示。存档完成后直接进入第 5 节；第 5 节的 `-DryRun` 会给出
+"能不能走官方升级"的结论，你按第 6 节的表处置即可。
+
 ---
 
 ## 5. 第二阶段任务：拿到新的升级 U 盘包后执行升级
 
-> 只有在**第一阶段汇报回来、构建侧确认后**才执行本阶段。
+> 前置：第 4 节已存档（不需要外部确认）。**先跑 `-DryRun`**，它零副作用且会给出放行结论。
 
 ### 5.1 包内容与准备
 
-升级包目录（示例：`E:\openclaw-offline-bundle\`）应包含：
+升级包目录（示例：`E:\openclaw-offline-bundle\`）是**自包含**的——脚本就在包里，双击即可：
 
 ```
-openclaw-2026.9.9.tgz     ← 升级目标（注意：文件名与父目录都不能含逗号！）
+bundle-manifest.json      ← 先读：mode / openClawVersion / packagedTarball / tarballSha256 / schemaVersions / nativePackages
+openclaw-2026.9.9.tgz     ← 升级目标（文件名与父目录都不能含逗号）
 npm-cache\                ← 预热好的 npm 缓存（含 9.9 全部传递依赖）
-app\                      ← 完整 9.9 整树，仅作救援/重装
-docs\  bundle-manifest.json  README.txt  UPGRADE.md   ← 本文档
+app\                      ← 仅 mode=app 时存在：完整 9.9 整树（救援/重装用）
+docs\                     ← 包内文档 + OFFLINE-CAPABILITIES.md（能力边界，建议先读）
+UPGRADE.md  UPGRADE-BRIEF.md  install.cmd  Upgrade-OpenClawOffline.ps1  upgrade.cmd
 ```
 
 准备：
-1. 用 manifest 里的 SHA256 核对 `openclaw-2026.9.9.tgz`（`Get-FileHash -Algorithm SHA256`）。
-2. `Get-ChildItem -Recurse | Unblock-File`（U 盘文件带 MOTW，不解除会执行失败）。
+1. `Get-Content .\bundle-manifest.json -Raw | ConvertFrom-Json` 看 `mode`、`openClawVersion`、`packagedTarball`、`tarballSha256`、`schemaVersions`。
+2. 核对 tarball 哈希：`Get-FileHash .\openclaw-<版本>.tgz -Algorithm SHA256`（与 manifest 的 `tarballSha256` 一致）。
+3. `Get-ChildItem -Recurse | Unblock-File`（U 盘文件带 MOTW，不解除会执行失败）。
+4. 读 `docs\OFFLINE-CAPABILITIES.md`（离线能力边界）与本文。
 
-### 5.2 执行顺序（逐条执行，每步确认输出后再继续）
+### 5.2 执行顺序
+
+**推荐走脚本**：在包目录里双击 `upgrade.cmd`（破坏性步骤前会要求输入 `YES`），或：
 
 ```powershell
-# (0) 记录起点
+# 先预演 —— 零副作用：不备份、不停服、不改动任何东西
+.\Upgrade-OpenClawOffline.ps1 -DryRun
+
+# 预演通过后再正式执行
+.\Upgrade-OpenClawOffline.ps1
+```
+
+脚本自己按顺序完成：校验 bundle/artifact → 比对版本与 schema → 备份（`backup create --verify`）→
+停 Gateway 并等它退出 → 官方 `update --dry-run` 闸门 → 应用 → `gateway install --force` →
+`gateway restart` → `doctor --post-upgrade` 验证 → 打印回滚命令。
+
+**手动等价步骤**（脚本不可用时照此执行，顺序与脚本一致）：
+
+```powershell
+# (0) 起点
 openclaw --version
 openclaw update status --json
 
@@ -162,7 +189,7 @@ openclaw gateway stop            # 若报错，再试 openclaw gateway stop --fo
 Get-Process node -ErrorAction SilentlyContinue | Select-Object Id,Path
 Get-ScheduledTask -TaskName 'OpenClaw*' | Select-Object TaskName,State
 
-# (3) 预演：先看计划，确认 owner 判定与 tarball 解析
+# (3) 闸门：确认 owner 判定与 tarball 解析（依赖只走随包缓存，不出网）
 $env:NPM_CONFIG_PREFIX  = 'C:\OpenClaw\app'
 $env:npm_config_cache   = 'E:\openclaw-offline-bundle\npm-cache'
 $env:npm_config_offline = 'true'
@@ -181,41 +208,46 @@ openclaw gateway status --deep --json
 openclaw doctor --lint --json
 ```
 
-**第 (3) 步的期望**：输出一份"计划"（会写明 `Tag/spec` 指向那个 tarball、要跑包管理器更新、跳过重启），并且**不出现** owner / registry 相关错误。
-**第 (3) 步是判定点**：如果它报 `global-install-foreign-destination` 或"没有检测到包管理器 owner"，**立即停止第二阶段并汇报**，不要硬闯第 (4) 步。
+**第 (3) 步的期望**：输出一份"计划"（写明 `Tag/spec` 指向那个 tarball、要跑包管理器更新、跳过重启），
+并且**不出现** owner / registry 相关错误。
+**第 (3) 步是唯一判定点**：若报 `global-install-foreign-destination` 或"没有检测到包管理器 owner"，
+**不要执行第 (4) 步** —— 先把 Gateway 起回来，然后按 §6 用 `-RescueTree` 处置。
 
-### 5.3 汇报格式（第二阶段）
+**两种包模式**（`manifest.mode`）：`app` = 整树在包内（安装脚本 robocopy + 计数校验）；`npmcache` =
+只有 cache + tarball，目标机自己跑离线安装。脚本按 manifest 自动处理，不需要你选。
 
-每一步都要：`命令 → 完整输出（含退出码）`，另外补齐：
+### 5.3 记录格式（本地存档，不回传）
+
+把每一步的命令与输出追加到 `C:\Backups\openclaw\UPGRADE-<日期>.log`，供现场复核与下次升级对照。
+必须包含：
 
 ```
 - 备份归档: <路径> <大小> <verify 结果>
 - 第(3)步 dry-run 是否通过: <是/否 + 关键输出行>
-- 第(4)步 update 的阶段与结果: <完整输出>
-- 升级后 openclaw --version: <>
-- 升级后 openclaw update status --json: <Channel / 版本>
-- state 库 user_version 变化: <17 → ?>
-- doctor --post-upgrade / doctor --lint --json 结论: <>
-- 计划任务状态与 gateway status --deep 结论: <>
-- 任何非 0 退出码与错误码（如 node-runtime-preflight / rollback-state-unverified）: <>
+- 第(4)步 update 的输出与退出码
+- 升级后 openclaw --version / update status --json
+- state 库 user_version 变化: <17 -> ?>
+- doctor --post-upgrade / doctor --lint --json 结论
+- 计划任务状态与 gateway status --deep 结论
+- 任何非 0 退出码与错误码
 - Control UI 是否可打开: <http://127.0.0.1:18789>
 ```
 
 ---
 
-## 6. 失败分支（不要硬闯，先汇报）
+## 6. 失败分支（自行按表处置，不要硬闯）
 
 | 现象 | 含义 | 处置 |
 | --- | --- | --- |
-| dry-run 报 `global-install-foreign-destination` / 无 owner | prefix 归属不匹配 | **停下汇报**，构建侧会给替代方案（例如改用包内 9.9 整树替换安装） |
-| `ENOTCACHED` / 依赖解析失败 | npm 缓存不全，或有别的 registry 配置在干扰 | 停下汇报；**不要改 registry**（改 registry 会让缓存键失配） |
-| 升级中止在 recovery pending | 9.5 旧驱动交接未完成 | `openclaw update repair --yes --json`，然后把输出汇报 |
-| 重命名失败 `EPERM`/`EBUSY`/`EACCES` | 有进程占用文件 | 确认 Gateway 确实停了；updater 自身会重试约 58 秒，仍失败则停服后重试并汇报 |
+| dry-run 报 `global-install-foreign-destination` / 无 owner | prefix 归属不匹配 | 重新 `openclaw gateway start`；改用 `.\Upgrade-OpenClawOffline.ps1 -RescueTree`（用包内整树替换），并在日志里记下原因 |
+| `ENOTCACHED` / 依赖解析失败 | npm 缓存不全，或有别的 registry 配置在干扰 | **不要改 registry**（会让缓存键失配）；改用 `-RescueTree`，并记录"cache 不全" |
+| 升级中止在 recovery pending | 9.5 旧驱动交接未完成 | `openclaw update repair --yes --json`，再重跑升级脚本 |
+| 重命名失败 `EPERM`/`EBUSY`/`EACCES` | 有进程占用文件 | 确认 Gateway 确实停了（D10 对照）；updater 自身会重试约 58 秒，仍失败则停服后重试 |
 | 启动报 `newer schema version` / 退出码 78 | 磁盘 schema 比当前构建新 | 属预期现象（见 §2.3）；用 `openclaw backup restore` 恢复升级前归档 |
 | 升级后想回退到 9.5 | 已跨 schema 迁移 | **换回旧整树无效**；唯一路径：`openclaw backup restore <归档> --target <空目录>`，再按官方流程切换状态目录、跑 doctor、启动 |
 | 服务指向旧路径 | Windows 上 updater 不会重绑服务定义 | `openclaw gateway install --force` |
 
-**恢复（restore）注意**：`openclaw backup restore` **从不就地恢复**，目标必须是空目录/不存在；恢复后需要停 Gateway、把状态目录切换到恢复出来的那份、先跑 `openclaw doctor`，再启动。若走到这一步，**先汇报再动作**。
+**恢复（restore）注意**：`openclaw backup restore` **从不就地恢复**，目标必须是空目录/不存在；恢复后需要停 Gateway、把状态目录切换到恢复出来的那份、先跑 `openclaw doctor`，再启动。走到这一步前，**先在日志里记下当前状态、拟恢复的归档路径与原因**，再动作。
 
 ---
 
@@ -234,4 +266,6 @@ openclaw doctor --lint --json
 
 ## 8. 一句话总结你的任务
 
-**先做 §4 的只读诊断并把原始输出汇报回来；等构建侧确认后，再按 §5 的顺序做升级，升级前务必完成并验证备份（因为本次跨 schema 迁移，备份是唯一回滚路径）。**
+**先做 §4 的只读诊断并存档到本机 `RECON.txt`（不需要请示）；然后按 §5 先跑 `-DryRun` 拿到放行结论，
+再正式升级。升级前必须完成并验证备份——本次跨 schema 迁移，备份是唯一回滚路径。出错时按 §6 表自行处置
+（首选 `-RescueTree`），并把全过程记进本机日志。**

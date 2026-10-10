@@ -159,10 +159,33 @@ openclaw --update          # 等价于 openclaw update
 | 4 | 未关 `update.checkOnStart` → 气隙机上每次启动都有失败的出网请求 | `[文档]` `docs/gateway/config-runtime.md:140` |
 | 5 | 升级前无恢复点、无停服骨架、未处理 9.5 第一跳与 Windows 服务重绑 | `[文档]` §2.5、§2.6 |
 
-`[实测]` 附带的两个事实（供体积与残留判断）：
+### 3.1 构建侧实测记录（编号链）
 
-- 5. 暖缓存 + `--offline` 条件下把 9.5 树原地升到 9.9 成功：`added 20 packages, removed 6 packages, and changed 323 packages`，版本变为 `OpenClaw 2026.9.9 (bcfc888)`；文件数 `41,406`、体积 `730M`，与全新 9.9 树（`41,406` / `729M`）一致 → **不残留旧版文件**。
-- 6. 完整 app 树实际约 **600–730MB**（9.5 是 574M/37,226 文件，9.9 是 730M/41,406 文件）。README 里此前写的"~390MB"是 npm 包的 `unpackedSize`，不是完整树 —— 需修正。
+构建侧：macOS + Node 26.7.0 + npm 11.19.0，使用真实 `openclaw@2026.9.5` / `2026.9.9` 包。
+
+1. **离线升级可行性**：暖缓存 + `--offline` 下把 9.5 树原地升到 9.9 成功
+   （`added 20 packages, removed 6 packages, and changed 323 packages`），版本变为 `OpenClaw 2026.9.9 (bcfc888)`，
+   文件数 `41,406` 与全新 9.9 树一致 → **不残留旧版文件**。
+2. **体积**：app 树 574 MB（9.5，37,226 文件）/ 730 MB（9.9，41,406 文件）；tarball ~114 MB。
+   （README 早期写的 "~390MB" 是包的 `unpackedSize`，不是完整树。）
+3. **schema 迁移**：9.5 声明 `state 17 / agent 21`，9.9 声明 `state 19 / agent 24`；9.5 建库
+   `user_version=17` → 9.9 打开后 `19` → 9.5 再打开被拒
+   （`uses newer schema version 19; this build supports 17`，CLI 退出码 1、doctor JSON 退出码 2）。
+4. **官方 updater 接受本地 artifact**：`--tag file:<tgz>` 的 dry-run 打印
+   *"Non-registry package specs skip npm version lookup"*，即目标选择不需要联网。
+5. **owner 判定**：npm 全局 prefix 与该树不一致时被拒（`global-install-foreign-destination`，
+   *No installation was attempted*）；用 `NPM_CONFIG_PREFIX` 对齐到该树后同一命令 dry-run 通过。
+6. **缓存键陷阱**：把 registry 指向死地址会让 npm 缓存键失配（`ENOTCACHED`）——离线验证必须用 `--offline`，
+   不要改 registry。失败是**非破坏**的：版本与文件数保持不变。
+7. **平台包扫描**：真实 macOS 树上抓出 6–7 个非 win32 包（`@esbuild/darwin-arm64`、
+   `@koromix/koffi-darwin-arm64`、`@lydell/node-pty-darwin-arm64`、`@openclaw/fs-safe-darwin-arm64`、
+   `@trycua/cua-driver-darwin-arm64`、`@ubjs/node-darwin-arm64`、`sqlite-vec-darwin-arm64`）；
+   合成树上 `*-win32-x64` / `*-windows-x64` 记入 `nativePackages`，而**嵌套布局**里的 darwin 包被判为 foreign。
+8. **配置与备份动作**：`config set update.checkOnStart false` 生效（`config get update` →
+   `{"checkOnStart": false}`，`config validate` 通过）；`backup create --output <已存在目录> --verify`
+   输出 `Archive verification: passed`，归档名为 `<目录>\<时间戳>-openclaw-backup.tar.gz`。
+9. **macOS 无法复现的部分**：`openclaw update` 的 handoff 身份校验依赖进程启动时间，而本沙箱禁用 `ps`
+   （darwin 无 argv 回退）→ 官方 update 的端到端只能在 Windows 上验证（见 §8）。
 
 ---
 
@@ -230,6 +253,10 @@ openclaw backup restore <archive> --target <空目录>   # 回滚：本次唯一
 
 **路径约束**：tarball 文件名与父目录**不能含逗号**（npm 12）`[文档]` `docs/install/installer.md:23`。另：`--tag` 用**路径**写法（官方示例 `./openclaw.tgz`），不要用 `file:` URL。
 
+**`-DryRun` 是独立路径，零副作用**（脚本已实现）：只做 bundle/artifact 校验 → 版本与 schema 比对 →
+调用官方 `update --dry-run` 打印计划，**不写备份、不停 Gateway、不改任何文件**。所以生产机上"先预演"是安全的，
+真流程（备份 → 停服 → 闸门 → 应用）只在去掉 `-DryRun` 时发生。
+
 ---
 
 ## 6. 产物与脚本改动清单
@@ -241,16 +268,23 @@ openclaw backup restore <archive> --target <空目录>   # 回滚：本次唯一
 | 新增 `npm pack openclaw@<ver>` | 产出 `openclaw-<ver>.tgz`，记录 SHA256 进 manifest（`packagedTarball` / `tarballSha256`） |
 | 新增"预热 cache" | 构建时以同一 `--cache` 目录安装目标版本，天然含全部传递依赖；升级包携带该 cache |
 | 保留整树产物 | 作为救援/重装通道（**不含回滚**：跨 schema 后旧包无法启动，见 §2.8） |
-| manifest `schemaVersion` 递增 | 已改为 4：新增 `packagedTarball`/`tarballSha256`/`schemaVersions`；老 bundle 仍可被新安装脚本读取 |
-| 携带 `UPGRADE-BRIEF.md` | 把目标机 AI 交接说明放进包根，随 U 盘一起到目标机（无外网，必须自带背景） |
-| README.txt | 增加"升级"段：tarball 路径、cache 路径、回滚只靠备份 |
+| manifest `schemaVersion` 升为 4 | 常量 `$BundleSchemaVersion`；新旧字段见下 |
+| manifest 新增字段 | `mode`、`targetPlatform`、`schemaVersions`、`installScriptPackages`、`nativePackages`、`packagedTarball`/`tarballSha256` |
+| **新增 `-Mode npmcache`** | 跨平台（含本 macOS 检出）只产出「预热 cache + tarball」：`npm --os=win32 --cpu=x64 --force --ignore-scripts` 预热，依赖脚本留给目标机；**不再无条件创建 `app\`**（否则安装侧的 mode 推断会误判） |
+| 跨平台 copy 派发 | `Invoke-CopyTree`：有 robocopy 用它（保持 >=8 失败的语义），否则 `Copy-Item` |
+| 平台包扫描 | 递归扫 `node_modules`（含 npm 嵌套布局），非 win32/windows-x64 的平台包**直接构建失败**，并记录 `nativePackages` |
+| bundle 自包含 | 把 `install.cmd`/`Install-*.ps1`/`upgrade.cmd`/`Upgrade-*.ps1`/`UPGRADE*.md` 拷进包根，双击即可零参数安装 |
+| 自带能力边界文档 | `docs\OFFLINE-CAPABILITIES.md` 随包交付；包内文档按模式取自 app 树或 tarball |
+| README.txt | 增"升级"段：tarball 路径、cache 路径、回滚只靠备份 |
 
 ### 6.2 `Upgrade-OpenClawOffline.ps1`（已实现）
 
 - 参数：`-BundleDir`、`-InstallRoot`（默认 `C:\OpenClaw`）、`-BackupDir`（默认 `C:\Backups\openclaw`）、`-GatewayPort`、`-SkipBackup`、`-DryRun`（只做预演）、`-RescueTree`（整树替换兜底）、`-Force`。
 - 流程即 §5：校验 bundle 与 artifact 哈希 → 版本与 schema 对比 → 备份（`backup create --output <目录> --verify`，并校验归档确实生成）→ 停 Gateway 并等待无 node 进程 → dry-run 闸门 → 正式 `update --tag <tgz>` → `gateway install --force` → `gateway restart` → `doctor --post-upgrade` 等验证 → 打印回滚命令。
 - 失败时用官方信号给处置建议：`global-install-foreign-destination`/无 owner、`ENOTCACHED`、`node-runtime-preflight`、`newer schema version`、`EPERM/EBUSY/EACCES`。
-- 预演失败也会**把 Gateway 起回来**再退出，不让机器停在那；`-DryRun` 走完预演后同样恢复服务。
+- 预演失败也会**把 Gateway 起回来**再退出，不让机器停在那（真实流程里已停服才需要这步）。
+- `-DryRun` **零副作用**：不备份、不停服、不落地——它走的是独立分支，流程见 §5 末。
+- 契约变量（`$BundleSchemaVersion`/`$OpenClawPackage`/`$NodeFloor`/`$TargetPlatform`）与 Make/Install 保持一致，并由预检脚本断言。
 - `upgrade.cmd` 提供双击入口，破坏性操作前要求输入 `YES` 确认。
 - PowerShell 5.1 约束沿用现有脚本：不加 `Join-Path` 第三参、不做出网假设、`Invoke-Native` 包裹原生命令、纯 ASCII 输出。
 
@@ -266,7 +300,14 @@ openclaw backup restore <archive> --target <空目录>   # 回滚：本次唯一
 
 ### 6.4 交付前预检（已实现）
 
-`Test-OpenClawOfflineScripts.ps1`：解析全部 `.ps1`、校验 PS 5.1 语法面（`Join-Path` 位置参数 ≤ 2、无 PS 6/7 专有写法）、校验脚本纯 ASCII + CRLF、复核 README 全部 `#L` 锚点的标签与目标一致且不越界。退出码 0 才允许打包。
+`Test-OpenClawOfflineScripts.ps1`：解析全部 `.ps1`、校验 PS 5.1 语法面（`Join-Path` 位置参数 ≤ 2、无 PS 6/7 专有写法）、校验脚本纯 ASCII + CRLF、复核 README 全部 `#L` 锚点的标签**与内容**一致且不越界，并断言**跨文件契约**：manifest schemaVersion、包名、Node 窗口、默认端口、bundle 携带清单、`.cmd` 调用关系、平台预热参数、`installScriptPackages`/`nativePackages` 的存在性。退出码 0 才允许打包。
+
+### 6.5 安装侧新增校验（已实现）
+
+- 复制/离线安装后比对 `appFileCount`/`appBytes`（app 模式）与 manifest 的 `nativePackages` 是否在位；
+  缺失即中止（平台错包或介质损坏）。
+- npmcache 模式解析 npm 输出的"未放行脚本"清单并**自动补跑一次全量 `--allow-scripts`**，仍被跳过则中止。
+- 首次安装写入 `update.checkOnStart=false`。
 
 ---
 
@@ -282,6 +323,9 @@ openclaw backup restore <archive> --target <空目录>   # 回滚：本次唯一
 | 升级后想回退到 9.5 | 已跨 schema 迁移（§2.8） | 换回旧整树无效（旧包会拒绝启动）；只能恢复归档 |
 | `node-runtime-preflight` | 目标版本跑不了当前 Node | 保持在 engines 窗口内（9.9 与 9.5 相同），避免触发私有 Node 下载 |
 | 服务指向旧路径 | Windows 上 updater 不重绑 | `openclaw gateway install --force` |
+| 构建时报"resolved packages for the wrong platform" | 平台包扫描发现非 win32-x64 的包（构建机平台误解析） | 用 `-Mode app` 在 Windows x64 上重建，或 `-Mode npmcache`（带 `--os/--cpu` 钉住） |
+| 安装后报 "Missing win32-x64 package(s)" | 目标树缺 manifest 记录的原生包 | 介质损坏或包平台错；换包重来，不要继续用这棵树 |
+| 安装时 "npm still reports install scripts it did not run" | 依赖的安装脚本被拒（npm 12 默认、或清单不全） | 用 Windows x64 上构建的 **app 模式**包（脚本在构建时就跑完） |
 
 ---
 
@@ -292,6 +336,9 @@ openclaw backup restore <archive> --target <空目录>   # 回滚：本次唯一
 1. **owner 判定**：设 `NPM_CONFIG_PREFIX=C:\OpenClaw\app` 后 `openclaw update --dry-run --tag <tgz>` 是否通过。macOS 端到端无法复现（沙箱禁用 `ps`，darwin 的 handoff 身份校验必失败；Windows 走独立的原生实现，不受此影响），只能真机验。
 2. **依赖真走缓存**：气隙机上 `npm_config_offline=true` + 随包 cache 能否把 ~63 个传递依赖装齐。
 3. **原生依赖**：目标机 npm 若为 12（默认拒绝依赖脚本），koffi / tree-sitter-bash / esbuild 的安装脚本是否被跳过 —— 这也是保留整树救援通道的价值所在。
+
+> 目标机在公司在、**拿不回任何输出**，所以这三件事不靠"汇报-定稿"推进：诊断结论写在目标机本地
+> `RECON.txt` 存档，放行判定由升级脚本内置的 `-DryRun` 闸门给出（见 `UPGRADE-BRIEF.md`）。
 
 **未决 / 风险**：
 

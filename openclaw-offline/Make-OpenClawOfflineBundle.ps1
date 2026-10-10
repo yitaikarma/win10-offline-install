@@ -27,20 +27,52 @@
 .PARAMETER IncludeNode
     Also carry a portable Node win-x64 runtime. Off by default (nvm is assumed).
 
+.PARAMETER Mode
+    app      = prebuilt win32-x64 tree under app\ (Windows x64 build host only)
+    npmcache = warmed win32-x64 npm cache + release tarball only; the target runs the
+               offline install itself. Buildable on any platform (this macOS checkout
+               included) because the warming pins --os win32 --cpu x64 and leaves the
+               dependency install scripts to the target (--ignore-scripts).
+
+.PARAMETER KeepStaging
+    Keep the _cachewarm\ staging tree in npmcache mode (diagnostics only; delete it
+    before copying the bundle to USB).
+
 .EXAMPLE
     .\Make-OpenClawOfflineBundle.ps1 -OutDir D:\bundle
+    Build host: Windows x64, full app tree + warm cache.
+
+.EXAMPLE
+    .\Make-OpenClawOfflineBundle.ps1 -Mode npmcache -OpenClawVersion 2026.9.9 -OutDir ./openclaw-offline-bundle
+    Build host: any platform (e.g. this macOS checkout), cache-only bundle.
 #>
 [CmdletBinding()]
 param(
+    [ValidateSet('app', 'npmcache')][string]$Mode = 'app',
     [string]$OpenClawVersion = 'latest',
     [switch]$IncludeNode,
     [string]$NodeVersion = '',
     [string]$OutDir = (Join-Path (Get-Location) 'openclaw-offline-bundle'),
+    [switch]$KeepStaging,
     [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# ---------------------------------------------------------------- contract
+# These constants are the shared contract with Install-*/Upgrade-*/Test-*. The
+# preflight script asserts the files still agree, because silent drift here is
+# exactly what breaks an air-gapped install months later.
+$OpenClawPackage     = 'openclaw'
+$BundleSchemaVersion = 4
+$TargetPlatform      = 'win32-x64'
+# Supported Node window (openclaw's own engines field): >=24.16 <25 OR >=26.1.
+$NodeFloor           = '24.16.0'
+$NodeCeiling         = '25.0.0'
+$NodeAltFloor        = '26.1.0'
+$NodeKnownGood       = '>=24.16 <25 or >=26.1'
+$DefaultGatewayPort  = 18789
 
 # Windows PowerShell 5.1 does not reliably negotiate TLS 1.2, which makes HTTPS
 # downloads fail with "Could not create SSL/TLS secure channel".
@@ -163,6 +195,67 @@ function Invoke-Download {
     throw "Download failed after $Attempts attempts: $Url"
 }
 
+# robocopy exists only on Windows, and npmcache mode also runs on Unix, so every tree
+# copy goes through this dispatcher. It keeps robocopy's exit-code contract (>= 8 means
+# failure) so the callers read the same way on both platforms.
+function Invoke-CopyTree([string]$Source, [string]$Destination) {
+    if (Get-Command 'robocopy.exe' -ErrorAction SilentlyContinue) {
+        $argString = "`"$Source`" `"$Destination`" /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP"
+        return (Start-Process -FilePath 'robocopy.exe' -ArgumentList $argString -Wait -PassThru -NoNewWindow).ExitCode
+    }
+    try {
+        if (-not (Test-Path $Destination)) { New-Item -ItemType Directory -Force -Path $Destination | Out-Null }
+        Copy-Item -Path (Join-Path $Source '*') -Destination $Destination -Recurse -Force -ErrorAction Stop
+        return 0
+    } catch {
+        Write-Note "copy failed: $($_.Exception.Message)"
+        return 16
+    }
+}
+
+# Platform-suffixed package directories under a node_modules root. npm resolves only the
+# target platform's optional deps, so anything that is not *-win32-x64 means the tree was
+# resolved for the wrong platform - and an air-gapped host cannot fix that. Scoped
+# packages (@scope/name) are inspected one level deep.
+function Get-PlatformPackages([string]$NodeModulesRoot) {
+    $native = New-Object System.Collections.Generic.List[string]
+    $foreign = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path $NodeModulesRoot)) {
+        return [pscustomobject]@{ Native = @(); Foreign = @() }
+    }
+    # Platform naming varies: koffi-darwin-arm64 (suffix), @esbuild/darwin-arm64 (scoped,
+    # no leading dash), sqlite-vec-windows-x64 (windows, not win32),
+    # node-addon-require-builtin-win32-x64-msvc (msvc suffix).
+    $platformPattern = '(^|[-/])(win32|windows|win|darwin|macos|mac|linux|freebsd|android|sunos)-(x64|arm64|arm|ia32|ppc64|s390x|riscv64)(-|$)'
+    $win32X64Pattern = '(^|[-/])(win32|windows)-x64(-|$)'
+    $candidates = New-Object System.Collections.Generic.List[string]
+    # npm hoists some packages and nests others inside the package that needs them
+    # (registry trap 17), so scan the root plus every nested node_modules directory.
+    $nmRoots = New-Object System.Collections.Generic.List[string]
+    $nmRoots.Add($NodeModulesRoot)
+    foreach ($nested in @(Get-ChildItem -Path $NodeModulesRoot -Recurse -Directory -Filter 'node_modules' -Force -ErrorAction SilentlyContinue)) {
+        $nmRoots.Add($nested.FullName)
+    }
+    foreach ($nmRoot in $nmRoots) {
+        foreach ($entry in @(Get-ChildItem -Path $nmRoot -Directory -Force -ErrorAction SilentlyContinue)) {
+            if ($entry.Name -eq 'node_modules') { continue }
+            if ($entry.Name.StartsWith('@')) {
+                foreach ($scoped in @(Get-ChildItem -Path $entry.FullName -Directory -Force -ErrorAction SilentlyContinue)) {
+                    $candidates.Add("$($entry.Name)/$($scoped.Name)")
+                }
+            } else {
+                $candidates.Add($entry.Name)
+            }
+        }
+    }
+    foreach ($name in @($candidates | Sort-Object -Unique)) {
+        if ("$name" -match $platformPattern) {
+            if ("$name" -match $win32X64Pattern) { $native.Add("$name") } else { $foreign.Add("$name") }
+        }
+    }
+    return [pscustomobject]@{ Native = @($native); Foreign = @($foreign) }
+}
+
 function Write-Step([string]$Text) { Write-Host "`n==> $Text" -ForegroundColor Cyan }
 function Write-Ok([string]$Text)   { Write-Host "    OK  $Text" -ForegroundColor Green }
 function Write-Note([string]$Text) { Write-Host "    !!  $Text" -ForegroundColor Yellow }
@@ -182,8 +275,10 @@ function Get-ResidueSnapshot {
 # ---------------------------------------------------------------- preflight
 Write-Step 'Preflight'
 
-if ($env:OS -ne 'Windows_NT') { throw 'This script must run on Windows.' }
-if (-not [Environment]::Is64BitOperatingSystem) { throw 'A 64-bit Windows host is required.' }
+if ($Mode -eq 'app' -and $env:OS -ne 'Windows_NT') {
+    throw 'Mode app must run on Windows: the app tree holds arch-bound native deps. Use -Mode npmcache on this host.'
+}
+if ($Mode -eq 'app' -and -not [Environment]::Is64BitOperatingSystem) { throw 'A 64-bit Windows host is required for -Mode app.' }
 $arch = $null
 # Do NOT use [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture:
 # that property does not exist on Windows PowerShell 5.1 / older .NET Framework,
@@ -194,8 +289,19 @@ switch ("$procArch") {
     'ARM64' { $arch = 'ARM64' }
     default { $arch = "$procArch" }
 }
-if ($arch -ne 'X64') { throw "Build the bundle on Windows x64 (detected: $arch): the app tree has arch-specific native deps." }
-Write-Ok "Host: Windows $arch, PowerShell $($PSVersionTable.PSVersion)"
+$hostIsWindowsX64 = ($env:OS -eq 'Windows_NT') -and ($arch -eq 'X64')
+if ($Mode -eq 'app' -and -not $hostIsWindowsX64) {
+    throw "Build the app tree on Windows x64 (detected: $arch): it has arch-specific native deps. Use -Mode npmcache here instead."
+}
+# Cross-warming: npm resolves the win32-x64 optional deps into the shipped cache, and
+# --ignore-scripts keeps the build host from running platform-bound install scripts
+# (koffi falls back to a cmake build on macOS and fails - verified).
+$crossWarm = ($Mode -eq 'npmcache') -and (-not $hostIsWindowsX64)
+if ($crossWarm) {
+    Write-Note "Cross-warming $TargetPlatform on a non-Windows-x64 host: npm gets --os win32 --cpu x64 --force --ignore-scripts."
+    Write-Note 'The dependency install scripts are left to the target host, which is win32-x64.'
+}
+Write-Ok "Host: $($env:OS) $arch, PowerShell $($PSVersionTable.PSVersion), mode $Mode"
 
 foreach ($exe in @('node', 'npm')) {
     if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) {
@@ -206,7 +312,7 @@ $nodeProbe = Invoke-Native -Command 'node' -Arguments @('-v')
 $hostNodeRaw = "$($nodeProbe.Lines | Select-Object -Last 1)".Trim()
 if ($hostNodeRaw -notmatch '^v(\d+)\.(\d+)\.(\d+)') { throw "Unrecognized Node version: $hostNodeRaw" }
 $hostNode = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
-$nodeOk = (($hostNode -ge [version]'24.16.0' -and $hostNode -lt [version]'25.0.0') -or ($hostNode -ge [version]'26.1.0'))
+$nodeOk = (($hostNode -ge [version]$NodeFloor -and $hostNode -lt [version]$NodeCeiling) -or ($hostNode -ge [version]$NodeAltFloor))
 if (-not $nodeOk) { throw "Local Node $hostNodeRaw is unsupported (need >=24.16 <25, or >=26.1)." }
 Write-Ok "Local Node $hostNodeRaw"
 
@@ -223,7 +329,7 @@ Write-Ok "Baseline: .openclaw=$($residueBefore.OpenClawState), `$env:APPDATA\npm
 Write-Step 'Resolving versions'
 
 if ($OpenClawVersion -eq 'latest') {
-    $viewProbe = Invoke-Native -Command 'npm' -Arguments @('view', 'openclaw', 'version')
+    $viewProbe = Invoke-Native -Command 'npm' -Arguments @('view', $OpenClawPackage, 'version')
     $resolvedOpenClaw = "$($viewProbe.Lines | Select-Object -Last 1)".Trim()
 } else {
     $resolvedOpenClaw = $OpenClawVersion
@@ -243,7 +349,7 @@ if ($IncludeNode) {
                 Sort-Object { [version]($_.version.TrimStart('v')) } -Descending |
                 Select-Object -First 1
         if (-not $pick) {
-            $pick = $stable | Where-Object { $_.version -match '^v24\.' -and [version]($_.version.TrimStart('v')) -ge [version]'24.16.0' } |
+            $pick = $stable | Where-Object { $_.version -match '^v24\.' -and [version]($_.version.TrimStart('v')) -ge [version]$NodeFloor } |
                     Sort-Object { [version]($_.version.TrimStart('v')) } -Descending |
                     Select-Object -First 1
         }
@@ -266,6 +372,7 @@ if ($bundleRoot.TrimEnd('\') -eq $driveRoot.TrimEnd('\')) {
 $stageApp   = Join-Path $bundleRoot 'app'
 $stageCache = Join-Path $bundleRoot 'npm-cache'
 $stageNode  = Join-Path $bundleRoot 'node'
+$warmStage  = Join-Path $bundleRoot '_cachewarm'
 $dlDir      = Join-Path $bundleRoot '_download'
 
 if (Test-Path $bundleRoot) {
@@ -289,24 +396,45 @@ if (Test-Path $bundleRoot) {
     }
 }
 
-foreach ($p in @($bundleRoot, $stageApp, $stageCache, $stageNode, $dlDir)) {
+# npmcache mode must NOT contain app\: when the manifest is silent the installer infers
+# the mode from app\ existing, and an empty app\ would look like a broken app bundle.
+$stagingDirs = @($bundleRoot, $stageCache, $stageNode, $dlDir)
+if ($Mode -eq 'app') { $stagingDirs += $stageApp }
+if ($Mode -eq 'npmcache') { $stagingDirs += $warmStage }
+foreach ($p in $stagingDirs) {
     if (-not (Test-Path $p)) { New-Item -ItemType Directory -Force -Path $p | Out-Null }
 }
-Write-Ok "Staging under $bundleRoot"
+Write-Ok "Staging under $bundleRoot ($Mode mode)"
 
 # ---------------------------------------------------------------- OpenClaw
-Write-Step "Installing openclaw@$resolvedOpenClaw into the bundle prefix"
+# app      : install the win32-x64 tree into app\ - this is what the target copies
+# npmcache : warm the shipped cache from a throwaway prefix; the target installs the
+#            tarball itself, so no build-host executable is needed here
+$stagedPrefix = $stageApp
+if ($Mode -eq 'npmcache') { $stagedPrefix = $warmStage }
+Write-Step "Preparing openclaw@$resolvedOpenClaw ($Mode mode)"
 
-$pkgJsonPath = Join-Path $stageApp 'node_modules\openclaw\package.json'
+$pkgJsonPath = Join-Path $stagedPrefix 'node_modules\openclaw\package.json'
 $appMarker = Join-Path $bundleRoot '.app-complete'
 $alreadyVersion = $null
 if (Test-Path $pkgJsonPath) { $alreadyVersion = (Get-Content $pkgJsonPath -Raw | ConvertFrom-Json).version }
 
+# Packages whose install scripts npm reported as unreviewed. Recorded in the manifest so
+# the target can name them in --allow-scripts (npm 12 denies dependency scripts by default).
+$installScriptPackages = New-Object System.Collections.Generic.List[string]
+if (-not $installScriptPackages.Contains($OpenClawPackage)) { $installScriptPackages.Add($OpenClawPackage) }
+
 if (($alreadyVersion -eq $resolvedOpenClaw) -and (Test-Path $appMarker)) {
-    Write-Ok "openclaw $resolvedOpenClaw is already in the bundle - skipping npm install"
+    Write-Ok "openclaw $resolvedOpenClaw is already staged - skipping npm install"
 } else {
-    $npmArgs = @('install', '-g', "openclaw@$resolvedOpenClaw", '--prefix', $stageApp, '--cache', $stageCache, '--no-audit', '--no-fund')
-    if ($needAllowScripts) { $npmArgs += '--allow-scripts=openclaw' }
+    $npmArgs = @('install', '-g', "$OpenClawPackage@$resolvedOpenClaw", '--prefix', $stagedPrefix, '--cache', $stageCache, '--no-audit', '--no-fund')
+    if ($crossWarm) { $npmArgs += @('--os', 'win32', '--cpu', 'x64', '--force') }
+    if ($Mode -eq 'npmcache') {
+        # Download only: the dependency install scripts belong to the target platform.
+        $npmArgs += '--ignore-scripts'
+    } elseif ($needAllowScripts) {
+        $npmArgs += "--allow-scripts=$OpenClawPackage"
+    }
     Write-Host "    npm $($npmArgs -join ' ')"
     $npmRun = Invoke-Native -Command 'npm' -Arguments $npmArgs -Show
     $npmLines = $npmRun.Lines
@@ -327,9 +455,12 @@ if (($alreadyVersion -eq $resolvedOpenClaw) -and (Test-Path $appMarker)) {
         }
     }
     if ($skipped.Count -gt 0) {
-        Write-Note "npm skipped install scripts for: $($skipped -join ', ')"
-        $allow = (@('openclaw') + $skipped) -join ','
-        $retryArgs = @('install', '-g', "openclaw@$resolvedOpenClaw", '--prefix', $stageApp, '--cache', $stageCache, '--no-audit', '--no-fund', "--allow-scripts=$allow")
+        foreach ($pkg in $skipped) { if (-not $installScriptPackages.Contains($pkg)) { $installScriptPackages.Add($pkg) } }
+        Write-Note "npm reported install scripts for: $($skipped -join ', ')"
+    }
+    if ($Mode -eq 'app' -and $skipped.Count -gt 0) {
+        $allow = (@($OpenClawPackage) + $skipped) -join ','
+        $retryArgs = @('install', '-g', "$OpenClawPackage@$resolvedOpenClaw", '--prefix', $stageApp, '--cache', $stageCache, '--no-audit', '--no-fund', "--allow-scripts=$allow")
         Write-Host "    npm $($retryArgs -join ' ')"
         $retryRun = Invoke-Native -Command 'npm' -Arguments $retryArgs -Show
         $retryOut = $retryRun.Lines
@@ -345,17 +476,26 @@ if (($alreadyVersion -eq $resolvedOpenClaw) -and (Test-Path $appMarker)) {
             }
         }
     }
-    # Only a tree whose install scripts actually ran is safe to reuse on resume.
-    Set-Content -Path $appMarker -Value $resolvedOpenClaw -Encoding ASCII
+    if ($Mode -eq 'npmcache') {
+        Write-Ok 'cache warmed for win32-x64 (dependency install scripts are left to the target host)'
+    }
+    # Only a tree whose install scripts actually ran is safe to reuse on resume; the mode
+    # is part of the marker so switching modes cannot reuse the wrong staging tree.
+    Set-Content -Path $appMarker -Value "$Mode/$resolvedOpenClaw" -Encoding ASCII
 }
 
-$launcher = Get-ChildItem -Path $stageApp -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.BaseName -eq 'openclaw' -and $_.Extension -in '.cmd', '.ps1', '.exe' } |
-            Select-Object -First 1
-if (-not $launcher) {
-    Write-Note "No openclaw launcher directly under $stageApp. Actual layout:"
-    Get-ChildItem -Path $stageApp -Recurse -Depth 2 -Force | Select-Object -ExpandProperty FullName | ForEach-Object { Write-Host "        $_" }
-    throw "Expected an openclaw launcher under $stageApp - check the layout printed above."
+if ($Mode -eq 'app') {
+    $launcher = Get-ChildItem -Path $stageApp -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.BaseName -eq 'openclaw' -and $_.Extension -in '.cmd', '.ps1', '.exe' } |
+                Select-Object -First 1
+    if (-not $launcher) {
+        Write-Note "No openclaw launcher directly under $stageApp. Actual layout:"
+        Get-ChildItem -Path $stageApp -Recurse -Depth 2 -Force | Select-Object -ExpandProperty FullName | ForEach-Object { Write-Host "        $_" }
+        throw "Expected an openclaw launcher under $stageApp - check the layout printed above."
+    }
+    Write-Ok "Launcher: $($launcher.FullName)"
+} else {
+    Write-Ok 'npmcache mode: no app tree is staged; the target installs the tarball itself'
 }
 
 # ---------------------------------------------------------------- upgrade artifact
@@ -369,7 +509,7 @@ $tarballPath = Join-Path $bundleRoot $tarballName
 if (Test-Path $tarballPath) {
     Write-Ok "already present: $tarballName (re-using)"
 } else {
-    $packArgs = @('pack', "openclaw@$resolvedOpenClaw", '--cache', $stageCache, '--pack-destination', $bundleRoot)
+    $packArgs = @('pack', "$OpenClawPackage@$resolvedOpenClaw", '--cache', $stageCache, '--pack-destination', $bundleRoot)
     Write-Host "    npm $($packArgs -join ' ')"
     $packRun = Invoke-Native -Command 'npm' -Arguments $packArgs -Show
     if ($packRun.ExitCode -ne 0) { throw "npm pack failed with exit code $($packRun.ExitCode)" }
@@ -388,17 +528,23 @@ if ("$bundleRoot$tarballName" -match ',') {
     Write-Note 'The bundle path or tarball name contains a comma - npm 12 rejects local .tgz installs in that case. Choose another -OutDir.'
 }
 
-# Ship the operator/AI-facing upgrade docs with the bundle (the target has no internet).
-foreach ($docName in @('UPGRADE.md', 'UPGRADE-BRIEF.md')) {
-    $docSrc = Join-Path $PSScriptRoot $docName
+# Ship the operator/AI-facing docs AND the entry points with the bundle, so the produced
+# folder is self-contained: open the bundle folder, double-click install.cmd (or
+# upgrade.cmd), and the zero-argument path works because BundleDir defaults to the
+# script's own folder. The scripts stay authoritative in the component folder; they are
+# copied at build time, so there is never a hand-maintained second copy.
+foreach ($name in @('UPGRADE.md', 'UPGRADE-BRIEF.md',
+                    'Install-OpenClawOffline.ps1', 'Upgrade-OpenClawOffline.ps1',
+                    'install.cmd', 'upgrade.cmd')) {
+    $docSrc = Join-Path $PSScriptRoot $name
     if (Test-Path $docSrc) {
-        Copy-Item -Path $docSrc -Destination (Join-Path $bundleRoot $docName) -Force
-        Write-Ok "carried $docName"
+        Copy-Item -Path $docSrc -Destination (Join-Path $bundleRoot $name) -Force
+        Write-Ok "carried $name"
     } else {
-        Write-Note "$docName is not next to this script - the bundle will not carry it."
+        Write-Note "$name is not next to this script - the bundle will not carry it."
     }
 }
-Write-Ok "Launcher: $($launcher.FullName)"
+Write-Ok 'bundle now carries its own installer and upgrade entry points'
 
 # ---------------------------------------------------------------- docs
 # The published package already ships docs/ (the package.json "files" list
@@ -407,22 +553,86 @@ Write-Ok "Launcher: $($launcher.FullName)"
 # air-gapped host. `openclaw docs` searches the LIVE site, so it will not work
 # there - reading these files is the offline path.
 Write-Step 'Collecting the bundled documentation'
-$docsSrc = Join-Path $stageApp 'node_modules\openclaw\docs'
+$docsSrc = Join-Path $stagedPrefix 'node_modules\openclaw\docs'
 $docsDst = Join-Path $bundleRoot 'docs'
+if (-not (Test-Path $docsDst)) { New-Item -ItemType Directory -Force -Path $docsDst | Out-Null }
+
+# Authored capability notes: the air-gapped host can read neither the repo nor the website.
+$authoredSrc = Join-Path $PSScriptRoot 'docs'
+if (Test-Path $authoredSrc) {
+    $authoredRc = Invoke-CopyTree $authoredSrc $docsDst
+    if ($authoredRc -ge 8) { Write-Note "authored docs copy failed (exit $authoredRc)" }
+    else {
+        $authoredCount = @(Get-ChildItem -Path $authoredSrc -File -Filter '*.md' -ErrorAction SilentlyContinue).Count
+        Write-Ok "$authoredCount authored page(s) under docs\"
+    }
+} else {
+    Write-Note 'no docs\ next to this script - shipping without the authored capability notes'
+}
+
 if (Test-Path (Join-Path $docsDst 'docs_map.md')) {
-    Write-Ok 'docs already collected - skipping'
+    Write-Ok 'package docs already collected - skipping'
 } elseif (Test-Path $docsSrc) {
-    $rc = Start-Process -FilePath 'robocopy.exe' -Wait -PassThru -NoNewWindow -ArgumentList `
-        "`"$docsSrc`" `"$docsDst`" /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP"
-    if ($rc.ExitCode -ge 8) { Write-Note "docs copy failed (robocopy exit $($rc.ExitCode))" }
+    $rc = Invoke-CopyTree $docsSrc $docsDst
+    if ($rc -ge 8) { Write-Note "docs copy failed (exit $rc)" }
     else {
         $mdCount = @(Get-ChildItem -Path $docsDst -Recurse -File -Filter '*.md' -ErrorAction SilentlyContinue).Count
         Write-Ok "$mdCount markdown files, $([math]::Round((Get-ChildItem -Path $docsDst -Recurse -File | Measure-Object -Property Length -Sum).Sum/1MB,1)) MB"
     }
-    $map = Join-Path $docsDst 'docs_map.md'
-    if (Test-Path $map) { Write-Ok 'docs_map.md present (offline index of every page)' }
+    if (Test-Path (Join-Path $docsDst 'docs_map.md')) { Write-Ok 'docs_map.md present (offline index of every page)' }
+} elseif ($Mode -eq 'npmcache' -and $tarballPath) {
+    # npmcache mode has no app tree to read from. The published package ships its docs/,
+    # so unpack just that folder out of the release tarball (bsdtar ships with Windows 10
+    # 1803+ and with macOS) - the docs stay version-matched to the artifact.
+    $tarCmd = Get-Command 'tar.exe' -ErrorAction SilentlyContinue
+    if (-not $tarCmd) { $tarCmd = Get-Command 'tar' -ErrorAction SilentlyContinue }
+    if (-not $tarCmd) {
+        Write-Note 'tar is not available - the bundle ships without the package docs.'
+    } else {
+        $extractDir = Join-Path $dlDir 'docs-extract'
+        if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
+        New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+        $tarRun = Invoke-Native -Command $tarCmd.Source -Arguments @('-xzf', $tarballPath, '-C', $extractDir, 'package/docs')
+        if ($tarRun.ExitCode -ne 0) {
+            Write-Note "extracting docs from the tarball failed (tar exit $($tarRun.ExitCode)) - shipping without the package docs."
+        } else {
+            $extracted = Join-Path $extractDir 'package\docs'
+            if (Test-Path $extracted) {
+                $rc = Invoke-CopyTree $extracted $docsDst
+                if ($rc -ge 8) { Write-Note "docs copy failed (exit $rc)" }
+                else {
+                    $mdCount = @(Get-ChildItem -Path $docsDst -Recurse -File -Filter '*.md' -ErrorAction SilentlyContinue).Count
+                    Write-Ok "$mdCount markdown files extracted from the release tarball"
+                    if (Test-Path (Join-Path $docsDst 'docs_map.md')) { Write-Ok 'docs_map.md present (offline index of every page)' }
+                }
+            } else {
+                Write-Note 'The tarball carries no package/docs - shipping without the package docs.'
+            }
+        }
+        Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
+    }
 } else {
-    Write-Note 'No docs/ inside the openclaw package - shipping without offline documentation.'
+    Write-Note 'No package docs available - shipping with the authored notes only.'
+}
+
+# ---------------------------------------------------------------- platform check
+# A tree resolved for another platform (e.g. darwin-arm64 packages warmed on this Mac)
+# is useless on the target and cannot be repaired there. Fail the build instead.
+$platformScan = Get-PlatformPackages (Join-Path $stagedPrefix 'node_modules')
+$nativePackages = @($platformScan.Native)
+if ($platformScan.Foreign.Count -gt 0) {
+    throw "The staged tree resolved packages for the wrong platform: $($platformScan.Foreign -join ', '). Rebuild for $TargetPlatform (mode app on Windows x64, or mode npmcache with the --os/--cpu pinning)."
+}
+Write-Ok "platform check: $($nativePackages.Count) $TargetPlatform package(s), no foreign platform packages"
+if ($nativePackages.Count -gt 0) { Write-Host "        $($nativePackages -join ', ')" }
+
+if ($Mode -eq 'npmcache') {
+    if ($KeepStaging) {
+        Write-Note "-KeepStaging: $warmStage is still on disk; delete it before copying the bundle to USB."
+    } else {
+        Remove-Item -Recurse -Force $warmStage -ErrorAction SilentlyContinue
+        Write-Ok '_cachewarm staging removed (the warmed cache is what ships)'
+    }
 }
 
 # ---------------------------------------------------------------- Node (optional)
@@ -470,40 +680,52 @@ if ($IncludeNode) {
 # ---------------------------------------------------------------- manifest
 Write-Step 'Writing manifest'
 
-$appFiles = @(Get-ChildItem -Path $stageApp -Recurse -File -Force)
-$pkgJson  = Join-Path $stageApp 'node_modules\openclaw\package.json'
+$appFiles = @()
+if (Test-Path $stageApp) { $appFiles = @(Get-ChildItem -Path $stageApp -Recurse -File -Force) }
+$pkgJson  = Join-Path $stagedPrefix 'node_modules\openclaw\package.json'
 $pkgMeta  = if (Test-Path $pkgJson) { Get-Content $pkgJson -Raw | ConvertFrom-Json } else { $null }
 $installedVersion = if ($pkgMeta) { $pkgMeta.version } else { $resolvedOpenClaw }
 # Declared DB schema of this build. The target's upgrade script compares it with the
 # installed build's and warns that a forward migration makes rollback backup-only.
 $schemaVersions = Get-Prop (Get-Prop $pkgMeta 'openclaw') 'schemaVersions'
+$appBytes = ($appFiles | Measure-Object -Property Length -Sum).Sum
+if ($null -eq $appBytes) { $appBytes = 0 }
 
 $manifest = [ordered]@{
-    schemaVersion       = 4
-    builtAtUtc          = (Get-Date).ToUniversalTime().ToString('o')
-    builtOn             = "Windows $arch"
-    openClawVersion     = $installedVersion
-    schemaVersions      = $schemaVersions
-    nodeBundled         = [bool]$IncludeNode
-    nodeVersion         = $nodePicked
-    nodeZip             = $nodeZipName
-    nodeZipSha256       = $nodeHash
-    packagedTarball     = $tarballName
-    tarballSha256       = $tarballHash
-    appFileCount        = $appFiles.Count
-    appBytes            = ($appFiles | Measure-Object -Property Length -Sum).Sum
-    npmVersionUsed      = $npmVerRaw
+    schemaVersion         = $BundleSchemaVersion
+    builtAtUtc            = (Get-Date).ToUniversalTime().ToString('o')
+    builtOn               = "$(if ($env:OS) { $env:OS } else { 'Unix' }) $arch"
+    mode                  = $Mode
+    targetPlatform        = $TargetPlatform
+    openClawVersion       = $installedVersion
+    schemaVersions        = $schemaVersions
+    installScriptPackages = @($installScriptPackages)
+    nativePackages        = @($nativePackages)
+    nodeBundled           = [bool]$IncludeNode
+    nodeVersion           = $nodePicked
+    nodeZip               = $nodeZipName
+    nodeZipSha256         = $nodeHash
+    packagedTarball       = $tarballName
+    tarballSha256         = $tarballHash
+    appFileCount          = $appFiles.Count
+    appBytes              = $appBytes
+    npmVersionUsed        = $npmVerRaw
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $bundleRoot 'bundle-manifest.json') -Encoding UTF8
-Write-Ok "openclaw $installedVersion / $($appFiles.Count) files / $([math]::Round($manifest.appBytes/1MB,1)) MB"
+Write-Ok "openclaw $installedVersion / mode $Mode / $($appFiles.Count) app files / $([math]::Round($appBytes/1MB,1)) MB"
 
 $readme = @"
 OpenClaw offline bundle
 =======================
 openclaw    : $installedVersion
+mode        : $Mode   (app = prebuilt tree, npmcache = target installs the tarball offline)
 node        : $(if ($nodePicked) { "$nodePicked (bundled)" } else { 'not bundled - bring your own nvm Node (24.16+/26.1+)' })
 built       : $($manifest.builtAtUtc)
-docs        : docs\  (also inside app\node_modules\openclaw\docs)
+docs        : docs\
+$(if ($Mode -eq 'app') { 'app         : app\  (copied to the install root)' } else { "artifact    : $tarballName + npm-cache\ (the target runs npm install --offline)" })
+
+This folder is self-contained: install.cmd / upgrade.cmd and their scripts are inside it,
+so a zero-argument install works from here.
 
 On the air-gapped Windows 10 x64 host:
 
@@ -512,14 +734,14 @@ On the air-gapped Windows 10 x64 host:
          nvm use 26.7.0
      openclaw needs >=24.16 <25 or >=26.1.
 
-  2. Unblock and install:
+  2. Unblock and install (double-click install.cmd, or):
          Get-ChildItem -Recurse | Unblock-File
          powershell -ExecutionPolicy Bypass -File .\Install-OpenClawOffline.ps1 -BundleDir <this folder> -BaseUrl http://<lan-llm>:<port>/v1 -ModelId <model-id>
 
 Do not rename app\ , docs\ , npm-cache\ or bundle-manifest.json.
 
 No desktop app and no WebView2 runtime are included: use the browser Control UI
-(http://127.0.0.1:18789) or pair another client with the setup code the installer
+(http://127.0.0.1:$DefaultGatewayPort) or pair another client with the setup code the installer
 prints.
 
 Upgrading this installation later (see UPGRADE-BRIEF.md for the full procedure):
@@ -545,7 +767,7 @@ Set-Content -Path (Join-Path $bundleRoot 'README.txt') -Value $readme -Encoding 
 
 Write-Host ''
 Write-Host 'Bundle ready:' -ForegroundColor Green
-Get-ChildItem -Path $bundleRoot -Force | Where-Object { $_.Name -ne '_download' } |
+Get-ChildItem -Path $bundleRoot -Force | Where-Object { $_.Name -notin @('_download', '_cachewarm') } |
     ForEach-Object { Write-Host ("  {0,-22} {1}" -f $_.Name, $(if ($_.PSIsContainer) { '' } else { "$([math]::Round($_.Length/1KB,1)) KB" })) }
 Write-Host ''
 Write-Host 'Copy the folder (not the top-level folder itself into _download) to the air-gapped host.' -ForegroundColor Green

@@ -53,7 +53,9 @@
     Do not take the pre-upgrade backup. NOT recommended: the backup is the only way back.
 
 .PARAMETER DryRun
-    Run the preflight (backup, stop, dry-run) and then stop without applying the update.
+    Verify the bundle, compare versions, and ask the updater for its plan - WITHOUT
+    changing anything. No backup archive is written, the Gateway keeps serving, and no
+    package is touched. Run this first on a production host.
 
 .PARAMETER RescueTree
     Skip the official updater and replace the app tree from the bundle instead.
@@ -63,7 +65,7 @@
 
 .EXAMPLE
     .\Upgrade-OpenClawOffline.ps1 -DryRun
-    Preflight only: verify, back up, stop the Gateway, run the updater's dry-run.
+    Zero side effects: verify the bundle, compare versions, print the updater plan.
 
 .EXAMPLE
     .\Upgrade-OpenClawOffline.ps1
@@ -90,6 +92,12 @@ Set-StrictMode -Version Latest
 #   Join-Path (Join-Path $root 'sub') $leaf
 # Everything else stays inside the 5.1 surface on purpose (no ??, ?:, -AsHashtable,
 # Get-Error or $IsWindows).
+
+# ---------------------------------------------------------------- contract
+# Shared contract with Make-*/Install-*/Test-*. Test-OpenClawOfflineScripts.ps1 asserts
+# the files still agree; silent drift here is what breaks an air-gapped upgrade.
+$OpenClawPackage     = 'openclaw'
+$BundleSchemaVersion = 4
 
 function Write-Step([string]$Text) { Write-Host "`n==> $Text" -ForegroundColor Cyan }
 function Write-Ok([string]$Text)   { Write-Host "    OK  $Text" -ForegroundColor Green }
@@ -164,6 +172,19 @@ $BundleDir = [System.IO.Path]::GetFullPath($BundleDir)
 $manifestPath = Join-Path $BundleDir 'bundle-manifest.json'
 if (-not (Test-Path $manifestPath)) { throw "bundle-manifest.json not found in $BundleDir" }
 $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+
+# Refuse a bundle this upgrader does not understand instead of half-upgrading it.
+$manifestSchema = Get-Prop $manifest 'schemaVersion'
+if ($null -ne $manifestSchema) {
+    if ([int]$manifestSchema -gt $BundleSchemaVersion) {
+        throw "Unsupported manifest schemaVersion $manifestSchema (this upgrader understands $BundleSchemaVersion). Use the upgrade script from that bundle."
+    }
+    if ([int]$manifestSchema -lt 4) {
+        Write-Note "Bundle schemaVersion $manifestSchema predates the upgrade fields (4): no packagedTarball/SHA256. Only -RescueTree is likely to work."
+    }
+} else {
+    Write-Note 'The manifest has no schemaVersion; treating it as a legacy bundle.'
+}
 
 $targetVersion  = Get-Prop $manifest 'openClawVersion'
 $tarballLeaf    = Get-Prop $manifest 'packagedTarball'
@@ -241,6 +262,40 @@ $schemaNew = "$(Get-Prop $targetSchema 'state')/$(Get-Prop $targetSchema 'agent'
 Write-Ok "declared schema (state/agent): installed $schemaOld -> target $schemaNew"
 if ($installedSchema -and $targetSchema -and $schemaOld -ne $schemaNew) {
     Write-Note 'This upgrade crosses a database schema migration. It is ONE-WAY: the older build will refuse the migrated state, so rollback means restoring the pre-upgrade backup below - not reinstalling the old package.'
+}
+
+# ---------------------------------------------------------------- dry run (no side effects)
+# -DryRun must NOT touch the machine: no backup archive, no service stop, no package
+# change. It verifies the bundle and asks the updater for its plan while the Gateway
+# keeps serving. Only the real run below backs up and stops anything.
+if ($DryRun) {
+    Write-Step 'Dry-run: verifying the bundle and the updater plan (nothing is changed)'
+    if ($RescueTree) {
+        Write-Note 'Rescue mode replaces the app tree; a dry-run cannot preview it. Nothing was changed.'
+    } else {
+        $savedPrefix = $env:NPM_CONFIG_PREFIX
+        $savedCache = $env:npm_config_cache
+        $savedOffline = $env:npm_config_offline
+        $env:NPM_CONFIG_PREFIX = $appDir
+        if (Test-Path $cacheStage) {
+            $env:npm_config_cache = $cacheStage
+            $env:npm_config_offline = 'true'
+        }
+        $planRun = Invoke-Native -Command $openclawCmd -Arguments @('update', '--dry-run', '--yes', '--no-restart', '--tag', $tarballPath) -Show
+        $env:NPM_CONFIG_PREFIX = $savedPrefix
+        $env:npm_config_cache = $savedCache
+        $env:npm_config_offline = $savedOffline
+        if ($planRun.ExitCode -ne 0) {
+            $hint = Get-FailureHint $planRun.Lines
+            if ($hint) { Write-Note $hint }
+            throw "The update preflight failed (exit $($planRun.ExitCode)). Nothing was changed: no backup, no service stop, no package change."
+        }
+        Write-Ok 'preflight passed: the updater accepted the artifact and the install ownership'
+    }
+    Write-Host ''
+    Write-Ok 'dry-run complete - nothing was backed up, stopped or changed'
+    Write-Note 'Re-run without -DryRun to apply the update; that run backs up state and stops the Gateway first.'
+    exit 0
 }
 
 # ---------------------------------------------------------------- backup
@@ -336,16 +391,6 @@ if ($RescueTree) {
         throw "The update preflight failed (exit $($dryRun.ExitCode)). Nothing was changed."
     }
     Write-Ok 'preflight passed: the updater accepted the artifact and the install ownership'
-
-    if ($DryRun) {
-        Write-Step 'Dry-run only (-DryRun): restarting the Gateway, no update applied'
-        Invoke-Native -Command $openclawCmd -Arguments @('gateway', 'start') -Show | Out-Null
-        Invoke-Native -Command $openclawCmd -Arguments @('gateway', 'status', '--json') -Show | Out-Null
-        Write-Host ''
-        Write-Ok 'preflight complete - re-run without -DryRun to apply the update'
-        Write-Note "Rollback (if you ever need it): openclaw backup restore `"$archivePath`" --target <empty dir>"
-        exit 0
-    }
 
     Write-Step "Applying: openclaw update --tag $tarballLeaf"
     $updateRun = Invoke-Native -Command $openclawCmd -Arguments @('update', '--yes', '--tag', $tarballPath) -Show
