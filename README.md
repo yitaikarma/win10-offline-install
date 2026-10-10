@@ -72,6 +72,9 @@
 
 **原生依赖 = 架构绑定。** app 型包内含 `sqlite-vec-win32-x64`、`koffi`、`tree-sitter-bash` 等带原生二进制/安装脚本的依赖，只能在 Windows x64 上构建（[Make:20-22](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L20-L22)）；**npm 12 起**这些依赖的安装脚本默认不执行（11.x 只是警告），必须显式放行并复查跳过清单 —— 目标机 npm 版本因此成为升级路径的判定项，见 [UPGRADE.md](openclaw-offline/UPGRADE.md) §8。
 
+**Node 版本窗口是逐包登记的**：上表是 openclaw 的窗口（由它的脚本强制）。新包必须自己声明下限，例如
+`dsh-web-offline` 的硬下限是 **>= 22.19**（依赖树 `engines.node` 的最大值），并把上表窗口当作已知良好提示。
+
 ### 2.5 磁盘、介质与本地约定
 
 - **安装根**：单一目录，默认 `C:\OpenClaw`；包内目录名固定（`app\`、`docs\`、`npm-cache\`），**不可重命名**。
@@ -120,6 +123,10 @@
 └── Test-<组件>Scripts.ps1       构建侧：交付前预检（语法/ASCII/CRLF/锚点）
 ```
 
+> 组件目录与 bundle 目录是两处：`openclaw-offline` 只把**产物**放进 bundle；`dsh-web-offline` 额外让构建脚本把
+> `install.cmd` / `Install-*.ps1` / `upgrade.cmd` / `Upgrade-*.ps1` 再拷一份进 bundle 根，这样目标机上"打开 bundle
+> 目录双击 `install.cmd`"就能零参数安装。脚本源头仍在组件目录，构建时复制，不存在两份手工维护的副本。
+
 ### 3.2 硬性要求
 
 1. **完整性**：每个外部下载物都记录 SHA256 并在安装前校验，不匹配即中止（Node zip 还必须比对官方 `SHASUMS256.txt`）。预构建应用树也必须在目标机复制后比对 manifest 的 `appFileCount`/`appBytes`——它是体积最大、最容易被 U 盘损坏的载荷。
@@ -130,7 +137,7 @@
 6. **边界声明**：明确写出"离线时会失败、属预期"的功能，避免被当成故障。
 7. **面向人**：一个纯 ASCII 的 `.cmd` 双击入口，内置前置检查（如 node 是否在 PATH）与清晰错误提示；破坏性操作（升级）要有确认提示。
 8. **可升级**：升级走官方 updater + 本地 artifact，包内必须同时带 **release tarball + 预热 npm cache**（tarball 不含传递依赖，官方也没有离线模式）；升级脚本必须"先备份、后停服、再预演"，并明确写出**回滚方式**。
-9. **交付前预检**：`Test-<组件>Scripts.ps1` 必须全绿再打包——它检查 PS 5.1 语法面（含 `Join-Path` 参数个数）、脚本纯 ASCII + CRLF、以及 README 行号锚点是否仍然自洽。
+9. **交付前预检**：`Test-<组件>Scripts.ps1` 必须全绿再打包——它检查 PS 5.1 语法面（含 `Join-Path` 参数个数）、脚本纯 ASCII + CRLF，以及 README 行号锚点是否仍然自洽；没有锚点的包则改为校验**跨文件契约**（manifest schema、包名、Node 下限、默认端口、安装脚本与原生包清单必须在 make/install/upgrade 之间一致，见 `dsh-web-offline` 的实现）。
 
 ### 3.3 两种打包模式（跨平台相关的分界）
 
@@ -163,6 +170,11 @@
 | 12 | 用户级 PATH 直接 `-notcontains` 去重 | 带尾分隔符/大小写不同的同一路径会被重复追加；应先 `TrimEnd('\')` 再比较（`-contains` 本身不区分大小写），并且没变化时不要回写 |
 | 13 | 脚本用 LF-only 行尾交付 | `.cmd` 在 cmd.exe 下是已知风险，`.ps1` 也不该与仓库约定不一致；用 `.gitattributes`（`*.ps1`/`*.cmd` → `eol=crlf`）固定，并由预检脚本校验 |
 | 14 | 升级/回滚当成"换回旧包" | 升级会把状态库 schema 前向迁移，旧构建随后**拒绝打开**（实测 9.5 的 17 → 9.9 的 19）。回滚只能靠升级前的 `openclaw backup create` 归档 |
+| 15 | npm ≥11.19 的 `--allow-scripts` **只允许全局作用域**安装使用 | 不带 `-g` 的 `npm install --prefix <dir> --allow-scripts=...` 直接 `EALLOWSCRIPTS`（提示改用 package.json 的 `allowScripts` 或 `.npmrc`）。要放行依赖脚本就必须 `npm install -g <pkg> --prefix <dir>` |
+| 16 | 跨平台预热 npm cache 时，依赖的安装脚本跑在**构建机平台**上 | `--os=win32 --cpu=x64` 在 macOS 上 warm 时 koffi 拿不到预编译二进制 → 回退 cmake 源码构建 → `fatal error: 'algorithm' file not found`，整个 install 失败（实测）。warm 阶段必须 `--ignore-scripts`，把脚本留给目标机执行 |
+| 17 | npm 11 的全局安装把依赖树**嵌在包目录内** | 布局是 `<prefix>\node_modules\@deepseek-ai\dsh\node_modules\<pkg>`，不是 hoist 到 `<prefix>\node_modules\<pkg>`。按固定路径探测原生包会全部漏判，必须探测两种布局并留递归兜底 |
+| 18 | dsh 的 Web 面有 browser-trust fence，`GET /` 正常返回 **401** | 无签名 cookie 时 `/` 回 401（"dsh web authentication required; reopen the URL printed by dsh web."）。必须先访问启动时打印的 activation URL（`http://127.0.0.1:<端口>/?token=...`）种下 cookie，`GET /` 才是 200。该 token **每次启动重铸**，只存在于服务控制台输出里——所以任何"探测 `http://host:port/` 是否 200"的冒烟测试都会误判，必须从输出里取回 URL（见 `dsh-web-offline/docs/WEB-SURFACE.md`） |
+| 19 | 构建侧 `~/.npm` 可能含 root-owned 文件（npm 旧版 bug） | `npm view` / `npm install` 会 `EPERM`（本机实测）。不要 `sudo chown` 用户目录，改用 `--cache <私有目录>` 绕过 |
 
 ---
 
@@ -171,8 +183,11 @@
 | 包 | 覆盖内容 | 目标机入口 | 状态 |
 | --- | --- | --- | --- |
 | [openclaw-offline](openclaw-offline/) | OpenClaw CLI + Gateway（计划任务，端口 18789），可选便携 Node。不含桌面端与 WebView2，界面走浏览器 Control UI | 安装 [install.cmd](openclaw-offline/install.cmd) / 升级 [upgrade.cmd](openclaw-offline/upgrade.cmd) | 脚本完整，未见构建产物或实机验证记录；**升级方案见 [UPGRADE.md](openclaw-offline/UPGRADE.md)**，目标机执行用 [UPGRADE-BRIEF.md](openclaw-offline/UPGRADE-BRIEF.md)，交付前预检 [Test-OpenClawOfflineScripts.ps1](openclaw-offline/Test-OpenClawOfflineScripts.ps1) |
+| [dsh-web-offline](dsh-web-offline/) | DeepSeek Harness **Web 版**（`dsh web`，默认 loopback 3080，用户级计划任务），内网 OpenAI 兼容端点配置。不含 Electron 桌面端 | 安装 [install.cmd](dsh-web-offline/install.cmd) / 升级 [upgrade.cmd](dsh-web-offline/upgrade.cmd) | 脚本完整；**版本化安装根**（`versions\<版本>` + `current.txt`）让回滚只改一行。npmcache 模式的 win32-x64 交叉预热 + 离线重装 + 离线 tgz 重装**已实测**；app 模式与实机安装**未验证**。升级方案 [UPGRADE.md](dsh-web-offline/UPGRADE.md)、目标机执行 [UPGRADE-BRIEF.md](dsh-web-offline/UPGRADE-BRIEF.md)、预检 [Test-DshWebOfflineScripts.ps1](dsh-web-offline/Test-DshWebOfflineScripts.ps1)、能力边界 [docs/OFFLINE-CAPABILITIES.md](dsh-web-offline/docs/OFFLINE-CAPABILITIES.md) |
 
 `openclaw-offline` 的细节（参数、配对流程、provider 模板）见脚本头部注释；它是第 2、3、4 节规范的**参考实现**，新增包时可以照抄结构。可升级组件的完整模式（构建侧产物、目标机升级流程、失败与回滚矩阵）见 [UPGRADE.md](openclaw-offline/UPGRADE.md)。
+
+`dsh-web-offline` 是第二个实现，覆盖 openclaw 那条线没遇到的三类问题：**没有官方 updater 的组件怎么升级**（版本化安装根 + 自动回滚）、**跨平台预热 npm cache**（`--os/--cpu` + `--ignore-scripts`）、以及**带认证围栏的 Web 面怎么做冒烟测试**（从服务输出里取回 activation URL，而不是拿 200 当健康判据）。它的构建侧实测记录写在 [UPGRADE.md](dsh-web-offline/UPGRADE.md) §4。
 
 ---
 

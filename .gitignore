@@ -1,4 +1,11 @@
 .DS_Store
 openclaw-offline-bundle/
+dsh-web-offline-bundle/
 _download/
+_cachewarm/
 *.tgz
+
+# PowerShell 7 console-host state file: written into the CURRENT DIRECTORY
+# whenever a pwsh 7 run is started there (e.g. by the preflight check on macOS).
+# Windows PowerShell 5.1, the target shell, does not create it.
+StartupProfileData-*
