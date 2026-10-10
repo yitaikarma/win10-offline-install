@@ -183,6 +183,7 @@
 | 19 | 构建侧 `~/.npm` 可能含 root-owned 文件（npm 旧版 bug） | `npm view` / `npm install` 会 `EPERM`（本机实测）。不要 `sudo chown` 用户目录，改用 `--cache <私有目录>` 绕过 |
 | 20 | 平台包**命名不统一**，按固定模式探测会漏判 | 实测到的四种写法都必须覆盖：`koffi-darwin-arm64`（后缀）、`@esbuild/darwin-arm64`（scoped、无前导横线）、`sqlite-vec-windows-x64`（**windows** 而非 `win32`）、`node-addon-require-builtin-win32-x64-msvc`（带 `-msvc` 后缀）。构建侧扫描须匹配 `(^\|[-/])(win32\|windows\|darwin\|linux\|…)-(x64\|arm64\|…)(-\|$)`，且必须**递归**（见陷阱 17） |
 | 21 | `openclaw backup create --output <路径>` 的语义取决于该路径**是否已存在** | 指向已存在目录 → 在里面生成带时间戳的 `*.tar.gz`（官方配方先 `mkdir` 就是这个原因）；指向不存在的路径 → 该路径被当成**归档文件本身**（生成一个没有扩展名的文件）。且 `backup restore` **从不就地恢复**、目标必须是空目录 |
+| 22 | 构建脚本直接读 `$env:USERPROFILE` / `$env:APPDATA` | 在 Unix 构建机（npmcache 模式）上两者为 `$null`，`Join-Path $null ...` 是**参数绑定终止性错误**，脚本会死在"残留快照"那一步（实测踩到）。应一次性解析成 `$residueHome`/`$residueAppData`（`USERPROFILE` → `HOME` → 当前目录兜底），预检脚本对此有负向断言 |
 
 ---
 
