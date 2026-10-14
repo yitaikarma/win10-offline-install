@@ -284,6 +284,33 @@ function Get-PlatformPackages([string]$NodeModulesRoot) {
     return [pscustomobject]@{ Native = @($native); Foreign = @($foreign) }
 }
 
+# npm's global layout differs by platform: <prefix>\node_modules on Windows, but
+# <prefix>/lib/node_modules on Unix. Scanning the Windows path on a macOS build host finds
+# nothing, which used to look like "the cross-warm pulled no platform packages".
+function Get-NpmGlobalModulesRoot([string]$Prefix, [string]$PackageName) {
+    $candidates = @(
+        (Join-Path $Prefix 'node_modules'),
+        (Join-Path (Join-Path $Prefix 'lib') 'node_modules')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path (Join-Path $candidate $PackageName)) { return $candidate }
+    }
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $candidates[0]
+}
+
+# Measure-Object returns $null (not 0) for an empty pipeline, and under Set-StrictMode the
+# follow-up .Sum is a terminating error. An empty app tree is normal in npmcache mode.
+function Get-TotalBytes($Items) {
+    $list = @($Items)
+    if ($list.Count -eq 0) { return 0 }
+    $sum = ($list | Measure-Object -Property Length -Sum).Sum
+    if ($null -eq $sum) { return 0 }
+    return $sum
+}
+
 function Write-Step([string]$Text) { Write-Host "`n==> $Text" -ForegroundColor Cyan }
 function Write-Ok([string]$Text)   { Write-Host "    OK  $Text" -ForegroundColor Green }
 function Write-Note([string]$Text) { Write-Host "    !!  $Text" -ForegroundColor Yellow }
@@ -316,6 +343,12 @@ switch ("$procArch") {
     'AMD64' { $arch = 'X64' }
     'ARM64' { $arch = 'ARM64' }
     default { $arch = "$procArch" }
+}
+if (-not $arch) {
+    # A Unix build host (npmcache mode) has no PROCESSOR_ARCHITECTURE. RuntimeInformation
+    # exists on .NET Core, which is what pwsh is on there; a Windows PowerShell 5.1 host
+    # always has the variables above, so this fallback is never reached there.
+    $arch = "$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)"
 }
 $hostIsWindowsX64 = ($env:OS -eq 'Windows_NT') -and ($arch -eq 'X64')
 if ($Mode -eq 'app' -and -not $hostIsWindowsX64) {
@@ -426,7 +459,7 @@ if (Test-Path $bundleRoot) {
 
 # npmcache mode must NOT contain app\: when the manifest is silent the installer infers
 # the mode from app\ existing, and an empty app\ would look like a broken app bundle.
-$stagingDirs = @($bundleRoot, $stageCache, $stageNode, $dlDir)
+$stagingDirs = @($bundleRoot, $stageCache, $dlDir)
 if ($Mode -eq 'app') { $stagingDirs += $stageApp }
 if ($Mode -eq 'npmcache') { $stagingDirs += $warmStage }
 foreach ($p in $stagingDirs) {
@@ -442,7 +475,7 @@ $stagedPrefix = $stageApp
 if ($Mode -eq 'npmcache') { $stagedPrefix = $warmStage }
 Write-Step "Preparing openclaw@$resolvedOpenClaw ($Mode mode)"
 
-$pkgJsonPath = Join-Path $stagedPrefix 'node_modules\openclaw\package.json'
+$pkgJsonPath = Join-Path (Join-Path (Get-NpmGlobalModulesRoot $stagedPrefix $OpenClawPackage) $OpenClawPackage) 'package.json'
 $appMarker = Join-Path $bundleRoot '.app-complete'
 $alreadyVersion = $null
 if (Test-Path $pkgJsonPath) { $alreadyVersion = (Get-Content $pkgJsonPath -Raw | ConvertFrom-Json).version }
@@ -506,10 +539,23 @@ if (($alreadyVersion -eq $resolvedOpenClaw) -and (Test-Path $appMarker)) {
     }
     if ($Mode -eq 'npmcache') {
         Write-Ok 'cache warmed for win32-x64 (dependency install scripts are left to the target host)'
+    } else {
+        # Only a persistent app tree is worth a resume marker; npmcache deletes its staging
+        # tree right after the platform check, so a marker there would only confuse.
+        Set-Content -Path $appMarker -Value "$Mode/$resolvedOpenClaw" -Encoding ASCII
     }
-    # Only a tree whose install scripts actually ran is safe to reuse on resume; the mode
-    # is part of the marker so switching modes cannot reuse the wrong staging tree.
-    Set-Content -Path $appMarker -Value "$Mode/$resolvedOpenClaw" -Encoding ASCII
+}
+
+# The staged package.json must be read HERE: npmcache mode deletes _cachewarm after the
+# platform check, and the manifest (which carries the schema contract) is written later.
+# A missing or mismatched package.json means the install did not land what we asked for.
+$stagedPkgJson = Join-Path (Join-Path (Get-NpmGlobalModulesRoot $stagedPrefix $OpenClawPackage) $OpenClawPackage) 'package.json'
+if (-not (Test-Path $stagedPkgJson)) {
+    throw "Cannot read the staged package metadata at $stagedPkgJson - the staging tree is incomplete."
+}
+$stagedPkgMeta = Get-Content $stagedPkgJson -Raw | ConvertFrom-Json
+if ("$($stagedPkgMeta.version)" -ne "$resolvedOpenClaw") {
+    throw "Staged tree drifted: requested $resolvedOpenClaw but the installed package reports version $($stagedPkgMeta.version)."
 }
 
 if ($Mode -eq 'app') {
@@ -581,7 +627,7 @@ Write-Ok 'bundle now carries its own installer and upgrade entry points'
 # air-gapped host. `openclaw docs` searches the LIVE site, so it will not work
 # there - reading these files is the offline path.
 Write-Step 'Collecting the bundled documentation'
-$docsSrc = Join-Path $stagedPrefix 'node_modules\openclaw\docs'
+$docsSrc = Join-Path (Join-Path (Get-NpmGlobalModulesRoot $stagedPrefix $OpenClawPackage) $OpenClawPackage) 'docs'
 $docsDst = Join-Path $bundleRoot 'docs'
 if (-not (Test-Path $docsDst)) { New-Item -ItemType Directory -Force -Path $docsDst | Out-Null }
 
@@ -646,15 +692,16 @@ if (Test-Path (Join-Path $docsDst 'docs_map.md')) {
 # ---------------------------------------------------------------- platform check
 # A tree resolved for another platform (e.g. darwin-arm64 packages warmed on this Mac)
 # is useless on the target and cannot be repaired there. Fail the build instead.
-$platformScan = Get-PlatformPackages (Join-Path $stagedPrefix 'node_modules')
+$platformScanRoot = Get-NpmGlobalModulesRoot $stagedPrefix $OpenClawPackage
+$platformScan = Get-PlatformPackages $platformScanRoot
 $nativePackages = @($platformScan.Native)
 if ($platformScan.Foreign.Count -gt 0) {
     throw "The staged tree resolved packages for the wrong platform: $($platformScan.Foreign -join ', '). Rebuild for $TargetPlatform (mode app on Windows x64, or mode npmcache with the --os/--cpu pinning)."
 }
-Write-Ok "platform check: $($nativePackages.Count) $TargetPlatform package(s), no foreign platform packages"
+Write-Ok "platform check: $($nativePackages.Count) $TargetPlatform package(s), no foreign platform packages (scanned $platformScanRoot)"
 if ($nativePackages.Count -gt 0) { Write-Host "        $($nativePackages -join ', ')" }
-if ($Mode -eq 'npmcache' -and $nativePackages.Count -eq 0) {
-    Write-Note "No $TargetPlatform platform package was resolved. The cross-warm probably did not pull the win32-x64 optional deps (partial or offline cache?), so the target would install an incomplete tree. Verify against a real build before shipping."
+if ($nativePackages.Count -eq 0 -and ($Mode -eq 'npmcache' -or -not (Test-Path $platformScanRoot))) {
+    Write-Note "No $TargetPlatform platform package was found under $platformScanRoot. Either the cross-warm did not pull the win32-x64 optional deps (partial or offline cache), or the prefix layout is unexpected - both mean the target would install an incomplete tree. Verify against a real build before shipping."
 }
 
 if ($Mode -eq 'npmcache') {
@@ -713,14 +760,15 @@ Write-Step 'Writing manifest'
 
 $appFiles = @()
 if (Test-Path $stageApp) { $appFiles = @(Get-ChildItem -Path $stageApp -Recurse -File -Force) }
-$pkgJson  = Join-Path $stagedPrefix 'node_modules\openclaw\package.json'
-$pkgMeta  = if (Test-Path $pkgJson) { Get-Content $pkgJson -Raw | ConvertFrom-Json } else { $null }
-$installedVersion = if ($pkgMeta) { $pkgMeta.version } else { $resolvedOpenClaw }
+$pkgMeta  = $stagedPkgMeta
+$installedVersion = $stagedPkgMeta.version
 # Declared DB schema of this build. The target's upgrade script compares it with the
 # installed build's and warns that a forward migration makes rollback backup-only.
 $schemaVersions = Get-Prop (Get-Prop $pkgMeta 'openclaw') 'schemaVersions'
-$appBytes = ($appFiles | Measure-Object -Property Length -Sum).Sum
-if ($null -eq $appBytes) { $appBytes = 0 }
+if (-not $schemaVersions) {
+    Write-Note 'The package declares no openclaw.schemaVersions - the upgrade script cannot warn about a forward schema migration.'
+}
+$appBytes = Get-TotalBytes $appFiles
 
 $manifest = [ordered]@{
     schemaVersion         = $BundleSchemaVersion

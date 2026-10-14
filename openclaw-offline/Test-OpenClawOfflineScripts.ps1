@@ -150,13 +150,13 @@ foreach ($file in $deliverables) {
 # and update this table in the same change.
 $anchorExpectations = @{
     'Install:176-177' = 'PROCESSOR_ARCHITEW6432'
-    'Make:311-313'    = 'OSArchitecture'
+    'Make:338-340'    = 'OSArchitecture'
     'Install:532'     = 'Installing the Gateway service'
     'Install:443-457' = 'CheckEndpoint'
     'Install:211-226' = 'Checking the Node runtime'
     'Install:286'     = 'needAllow'
     'Make:20-22'      = 'build on Windows x64'
-    'Make:769'        = 'Unblock-File'
+    'Make:817'        = 'Unblock-File'
     'Install:158-172' = 'Get-Prop \$manifest'
 }
 

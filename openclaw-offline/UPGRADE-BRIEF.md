@@ -1,4 +1,4 @@
-# 目标机 AI 交接说明：OpenClaw 离线升级（2026.9.5 → 2026.9.9）
+# 目标机 AI 交接说明：OpenClaw 离线升级（2026.9.5 → 包内版本；本文示例 2026.10.3）
 
 > **请先通读全文再动手。** 你是运行在**气隙 Windows 10 x64 目标机**上的 AI；本机**没有互联网**，本文自带全部背景，不要尝试联网查资料或下载任何东西。
 > **术语**："气隙机（air-gapped host）"＝与互联网无任何链路、数据只能靠 U 盘搬运的机器。
@@ -30,7 +30,7 @@
 | Node | 由 **nvm-windows** 提供，当前应为 **26.7.0** |
 | 界面 | 浏览器 Control UI（`http://127.0.0.1:18789`）。**本包不含桌面客户端，也不含 WebView2**，不要去找 Companion/Hub |
 
-**这次要做什么**：把 OpenClaw 从 **2026.9.5 升到 2026.9.9**，通道 `stable`，走**官方 updater** 并以**本地 tarball** 为升级目标。
+**这次要做什么**：把 OpenClaw 从 **2026.9.5 升到包里带的版本**（读 `bundle-manifest.json` 的 `openClawVersion`；本文示例 **2026.10.3**），通道 `stable`，走**官方 updater** 并以**本地 tarball** 为升级目标。
 
 ---
 
@@ -38,7 +38,7 @@
 
 ### 2.1 官方 updater 可以用本地 tarball，但官方**没有**离线模式
 
-- 官方文档明确把"显式 artifact（tarball 路径）"与注册表目标视为同一条升级流程：`openclaw update --tag <路径>\openclaw-2026.9.9.tgz`。
+- 官方文档明确把"显式 artifact（tarball 路径）"与注册表目标视为同一条升级流程：`openclaw update --tag <路径>\openclaw-<版本>.tgz`。
 - 但官方**没有** `--offline` 参数、没有气隙流程。openclaw 的 tarball **不自带全部依赖**（9.9 的 tarball 只含 3 个包，而 `package.json` 声明 66 个依赖）。
 - 所以离线能否成功 = **随包带的 npm 缓存全不全** + **npm 是否只走缓存**。升级包里会带一份预热好的 `npm-cache\`，执行时用环境变量把 npm 指过去（见 §5）。
 
@@ -50,7 +50,7 @@ updater 会从 **npm 配置的全局 prefix + 已安装启动器** 推断这个 
 
 ### 2.3 这次升级**跨数据库 schema 迁移**，所以回滚只有一条路
 
-已在真实 2026.9.5 / 2026.9.9 包上实测：
+已在真实 2026.9.5 / 2026.9.9 包上实测（2026.10.3 只做了元数据与文档级核对 + 一次 macOS 侧 npmcache 构建，见 `UPGRADE.md` §3.2）：
 
 | 观测 | 结果 |
 | --- | --- |
@@ -139,9 +139,9 @@ D1: <命令>
 
 ```
 bundle-manifest.json      ← 先读：mode / openClawVersion / packagedTarball / tarballSha256 / schemaVersions / nativePackages
-openclaw-2026.9.9.tgz     ← 升级目标（文件名与父目录都不能含逗号）
-npm-cache\                ← 预热好的 npm 缓存（含 9.9 全部传递依赖）
-app\                      ← 仅 mode=app 时存在：完整 9.9 整树（救援/重装用）
+openclaw-<版本>.tgz       ← 升级目标（本次 = 2026.10.3；文件名与父目录都不能含逗号）
+npm-cache\                ← 预热好的 npm 缓存（含目标版本的全部传递依赖）
+app\                      ← 仅 mode=app 时存在：完整整树（救援/重装用）
 docs\                     ← 包内文档 + OFFLINE-CAPABILITIES.md（能力边界，建议先读）
 UPGRADE.md  UPGRADE-BRIEF.md  install.cmd  Upgrade-OpenClawOffline.ps1  upgrade.cmd
 ```
@@ -193,15 +193,15 @@ Get-ScheduledTask -TaskName 'OpenClaw*' | Select-Object TaskName,State
 $env:NPM_CONFIG_PREFIX  = 'C:\OpenClaw\app'
 $env:npm_config_cache   = 'E:\openclaw-offline-bundle\npm-cache'
 $env:npm_config_offline = 'true'
-openclaw update --dry-run --yes --no-restart --tag 'E:\openclaw-offline-bundle\openclaw-2026.9.9.tgz'
+openclaw update --dry-run --yes --no-restart --tag 'E:\openclaw-offline-bundle\openclaw-2026.10.3.tgz'
 
 # (4) 正式升级（不加 --no-restart，让 updater 自己处理重启阶段）
-openclaw update --yes --tag 'E:\openclaw-offline-bundle\openclaw-2026.9.9.tgz'
+openclaw update --yes --tag 'E:\openclaw-offline-bundle\openclaw-2026.10.3.tgz'
 
 # (5) Windows 收尾（官方要求：重建计划任务 launcher）
 openclaw gateway install --force
 openclaw gateway restart
-openclaw --version                      # 期望 2026.9.9
+openclaw --version                      # 期望 = manifest 里的 openClawVersion（本次 2026.10.3）
 openclaw doctor --post-upgrade
 openclaw health
 openclaw gateway status --deep --json

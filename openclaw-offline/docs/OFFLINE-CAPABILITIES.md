@@ -4,7 +4,8 @@
 > 本文件随离线包交付，是目标机上唯一的权威说明——目标机读不到仓库、也读不到官网。
 >
 > 标注约定：**实测** = 在构建侧（macOS + Node 26.7.0 + npm 11.19.0 + 真实 `openclaw@2026.9.5` /
-> `2026.9.9` 包）验证过；**未验证** = 尚未在真实 Win10 气隙机上复核，属推断。方案与出处见
+> `2026.9.9` / `2026.10.3` 包）验证过；**未验证** = 尚未在真实 Win10 气隙机上复核，属推断。
+> 版本以包内 `bundle-manifest.json` 的 `openClawVersion` 为准（本文示例 **2026.10.3**）。方案与出处见
 > `UPGRADE.md`，目标机执行步骤见 `UPGRADE-BRIEF.md`。
 
 ## 1. 前提
@@ -17,7 +18,7 @@
 | npm | 随 Node 提供；**11.16+ 引入 `--allow-scripts`，11.x 默认只警告、依赖脚本仍会执行；默认拒绝是 npm 12.0.0 起** | **实测**（npm 11.19 上未列入的包脚本仍执行并告警） |
 | 网络 | 安装、启动、升级都**不需要**外网；模型推理走内网 OpenAI 兼容端点 | 脚本与设计 |
 | 权限 | 全程用户级：不写 HKLM、不装 Windows 服务（用用户级计划任务）、PATH 只改用户级 | 脚本 |
-| 磁盘 | 预构建 app 树 **574 MB（2026.9.5）/ 730 MB（2026.9.9）**；升级峰值（stage + 救援整树）可能到 ~1.5 GB | **实测** |
+| 磁盘 | 预构建 app 树 **574 MB（2026.9.5）/ 730 MB（2026.9.9）**；`npmcache` 包 **439 MB**（cache 320 + tarball 98 + docs 20，2026.10.3 实测）；升级峰值（stage + 救援整树）可能到 ~1.5 GB | **实测** |
 
 ## 2. 能做什么
 
@@ -49,14 +50,18 @@
 
 ## 4. 原生依赖与安装脚本（air-gap 下最脆的一环）
 
-架构绑定的包必须在**目标平台**上解析。构建侧在 macOS 树上实测到的同类包（Windows 上应为对应 win32-x64 变体）：
+架构绑定的包必须在**目标平台**上解析。交叉预热（`--os win32 --cpu x64`）在 2026.10.3 上实际解析出的 win32-x64 包（**实测**，会写进 manifest 的 `nativePackages` 并在目标机逐个校验）：
 
 ```
-@esbuild/<platform>-<arch>            @koromix/koffi-<platform>-<arch>
-@lydell/node-pty-<platform>-<arch>    @openclaw/fs-safe-<platform>-<arch>
-@trycua/cua-driver-<platform>-<arch>  @ubjs/node-<platform>-<arch>
-sqlite-vec-<platform>-<arch>          node-addon-require-builtin-win32-x64-msvc
+@esbuild/win32-x64                    @koromix/koffi-win32-x64
+@lydell/node-pty-win32-x64            @openclaw/fs-safe-win32-x64-msvc
+@trycua/cua-driver-win32-x64-msvc     @ubjs/node-win32-x64-msvc
+sqlite-vec-windows-x64
 ```
+
+命名不统一（这正是构建侧扫描必须写成“平台名 + 架构”宽松模式的原因）：`koffi-darwin-arm64`（后缀）、
+`@esbuild/darwin-arm64`（scoped、无前导横线）、`sqlite-vec-windows-x64`（**windows** 而非 `win32`）、
+`@openclaw/fs-safe-win32-x64-msvc`（带 `-msvc`）。
 
 - **app 模式**：在 Windows x64 上构建，依赖脚本在构建时就跑完，整树带过去。构建脚本会扫描树内
   平台包：出现非 `win32-x64`（或 `windows-x64`）的包即**构建失败**（**实测**：macOS 树上会抓出
@@ -71,7 +76,8 @@ sqlite-vec-<platform>-<arch>          node-addon-require-builtin-win32-x64-msvc
 
 | 产物 | 体积 | 说明 |
 | --- | --- | --- |
-| `app\`（预构建树） | 574 MB（9.5）/ 730 MB（9.9） | 41,406 文件（9.9） |
+| `app\`（预构建树） | 574 MB（9.5）/ 730 MB（9.9）；10.3 的完整 win32 树未实测（其 npm 包 unpacked 257 MB，比 9.9 的 389 MB 小） | 41,406 文件（9.9） |
+| `npmcache` 包（10.3 实测） | **439 MB**：`npm-cache` 320 + tarball 98 + `docs` 20 | 1296 篇文档 |
 | `openclaw-<版本>.tgz` | ~114 MB | 升级用的 release artifact |
 | `npm-cache\` | 百 MB 级 | 升级/离线安装的依赖来源 |
 | 升级峰值 | ~1.5 GB | stage 到临时前缀 + 救援整树 + 状态快照 |
@@ -82,7 +88,7 @@ sqlite-vec-<platform>-<arch>          node-addon-require-builtin-win32-x64-msvc
 
 - 全部状态在 `%USERPROFILE%\.openclaw`：`openclaw.json`（+ `.bak`…`.bak.4` 备份环）、`credentials\`、
   `sessions\`、`state\openclaw.sqlite`、`agents\<id>\agent\openclaw-agent.sqlite`、`logs\`。
-- **数据库 schema 是单向迁移的**：9.5 声明 `state 17 / agent 21`，9.9 声明 `state 19 / agent 24`；
+- **数据库 schema 是单向迁移的**：9.5 = `state 17 / agent 21` → 9.9 = `state 19 / agent 24` → **2026.10.3 = `state 20 / agent 24`**；
   9.5 建的库被 9.9 打开后 `user_version` 由 17 变 19，随后**9.5 拒绝打开**该库（**实测**）。
 - 因此**升级后"换回旧包"救不回来**：回滚 = 恢复升级前的 `openclaw backup create` 归档（放在状态目录之外）。
 

@@ -36,7 +36,7 @@
 | --- | --- |
 | 系统 | Windows 10，64 位 |
 | 架构 | **x64 / AMD64 only**。安装脚本硬性校验 `PROCESSOR_ARCHITECTURE=AMD64`，其他架构直接 `throw`（[Install:176-177](openclaw-offline/Install-OpenClawOffline.ps1#L176-L177)） |
-| Shell | **Windows PowerShell 5.1**（系统自带版本）。脚本刻意避开 PS7/.NET Core 专有 API，例如不用 `RuntimeInformation.OSArchitecture`（[Make:311-313](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L311-L313)） |
+| Shell | **Windows PowerShell 5.1**（系统自带版本）。脚本刻意避开 PS7/.NET Core 专有 API，例如不用 `RuntimeInformation.OSArchitecture`（[Make:338-340](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L338-L340)） |
 | 具体 build 号 ❓ | 未锁定。脚本只校验 x64 + Win10 语义（`curl.exe` 需 1803+） |
 | 语言/区域 ❓ | 未锁定。脚本所有输出与 `.cmd` 均为 ASCII，规避 OEM 代码页问题 |
 
@@ -73,7 +73,7 @@
 **原生依赖 = 架构绑定。** app 型包内含 `sqlite-vec-win32-x64`、`koffi`、`tree-sitter-bash` 等带原生二进制/安装脚本的依赖，只能在 Windows x64 上构建（[Make:20-22](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L20-L22)）；**npm 12 起**这些依赖的安装脚本默认不执行（11.x 只是警告），必须显式放行并复查跳过清单。两条线各自的做法：
 
 - **app 模式**（首选）：Windows x64 上构建，脚本在构建时跑完，整树带过去。构建脚本会**递归扫描平台包**，出现非 `win32-x64`/`windows-x64` 的包即构建失败（`openclaw-offline` 与 `dsh-web-offline` 都实现了）。
-- **npmcache 模式**（可在 macOS 检出构建）：`npm --os=win32 --cpu=x64 --force --ignore-scripts` 只下载、把脚本留给目标机执行（理由见第 4 节陷阱 16）。
+- **npmcache 模式**（可在 macOS 检出构建）：`npm --os=win32 --cpu=x64 --force --ignore-scripts` 只下载、把脚本留给目标机执行（理由见第 4 节陷阱 16）。2026.10.3 上已**零改动跑通**（439 MB，manifest 记下 7 个原生包）。
 - **目标是升级路径的判定项**：目标机 npm 版本（11 vs 12）决定依赖脚本是否会执行，见 [openclaw-offline/UPGRADE.md](openclaw-offline/UPGRADE.md) §8。
 
 **Node 版本窗口是逐包登记的**：上表是 openclaw 的窗口（由它的脚本强制）。新包必须自己声明下限，例如
@@ -84,8 +84,8 @@
 - **安装根**：单一目录，默认 `C:\OpenClaw`；包内目录名固定（`app\`、`docs\`、`npm-cache\`），**不可重命名**。
 - **配置与日志**：集中在用户目录，如 `%USERPROFILE%\.openclaw\openclaw.json`、`%USERPROFILE%\.openclaw\logs`。
 - **监听约定**：本地服务默认绑 **loopback**，端口取高位（Gateway 用 `18789`，`ws://127.0.0.1:18789`）。
-- **传输介质**：U 盘/移动硬盘。**文件会带 MOTW，安装前必须 `Get-ChildItem -Recurse | Unblock-File`**（[Make:769](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L769)）。
-- **体积敏感**：预构建 app 树实测 **574 MB（2026.9.5）/ 730 MB（2026.9.9）**；升级包另需 tarball（~114 MB）与预热 npm cache，升级期间磁盘峰值（stage + 救援整树）可能到 ~1.5 GB。拷贝前应能删掉 `_download\` 中间产物。
+- **传输介质**：U 盘/移动硬盘。**文件会带 MOTW，安装前必须 `Get-ChildItem -Recurse | Unblock-File`**（[Make:817](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L817)）。
+- **体积敏感**：预构建 app 树实测 **574 MB（2026.9.5）/ 730 MB（2026.9.9）**；升级包另需 tarball（~98–114 MB）与预热 npm cache，升级期间磁盘峰值（stage + 救援整树）可能到 ~1.5 GB。`npmcache` 模式的整包实测 **439 MB**（2026.10.3：cache 320 + tarball 98 + docs 20）。拷贝前应能删掉 `_download\` 中间产物。
 - 磁盘余量、内存、机器名/序列号 ❓ 未记录。
 
 ### 2.6 待登记项
@@ -143,7 +143,8 @@
 6. **边界声明**：明确写出"离线时会失败、属预期"的功能，避免被当成故障。
 7. **面向人**：一个纯 ASCII 的 `.cmd` 双击入口，内置前置检查（如 node 是否在 PATH）与清晰错误提示；破坏性操作（升级）要有确认提示。
 8. **可升级**：升级走官方 updater + 本地 artifact，包内必须同时带 **release tarball + 预热 npm cache**（tarball 不含传递依赖，官方也没有离线模式）；升级脚本必须"先备份、后停服、再预演"，并明确写出**回滚方式**。
-9. **交付前预检**：`Test-<组件>Scripts.ps1` 必须全绿再打包——它检查 PS 5.1 语法面（含 `Join-Path` 参数个数）、脚本纯 ASCII + CRLF，以及 README 行号锚点是否仍然自洽；没有锚点的包则改为校验**跨文件契约**（manifest schema、包名、Node 下限、默认端口、安装脚本与原生包清单必须在 make/install/upgrade 之间一致，见 `dsh-web-offline` 的实现）。
+9. **版本无关**：脚本里**不写死组件版本**。升级目标、版本号、schema 声明、artifact 名与哈希全部从 bundle 与 manifest 读取；被钉死的只有跨版本稳定的契约（包名、目标平台、默认端口、Node 窗口、manifest schemaVersion），并由预检的跨文件断言守着。**上游发新版 = 只重新打一个包**，不改脚本；每换一次版本顺手用 `npm view <包> version engines bin <包> --json` + 真实 tarball 核一遍这几条契约（范例见 [openclaw-offline/UPGRADE.md](openclaw-offline/UPGRADE.md) §3.2）。
+10. **交付前预检**：`Test-<组件>Scripts.ps1` 必须全绿再打包——它检查 PS 5.1 语法面（含 `Join-Path` 参数个数）、脚本纯 ASCII + CRLF，以及 README 行号锚点是否仍然自洽；没有锚点的包则改为校验**跨文件契约**（manifest schema、包名、Node 下限、默认端口、安装脚本与原生包清单必须在 make/install/upgrade 之间一致，见 `dsh-web-offline` 的实现）。
 
 ### 3.3 两种打包模式（跨平台相关的分界）
 

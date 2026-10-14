@@ -1,6 +1,7 @@
 # OpenClaw 离线升级方案
 
-**适用范围**：`openclaw-offline` 这个包在气隙 Win10 x64 目标机上的**版本升级**（本次：`2026.9.5 → 2026.9.9`）。
+**适用范围**：`openclaw-offline` 这个包在气隙 Win10 x64 目标机上的**版本升级**（本次：`2026.9.5 → 2026.10.3`）。
+**版本无关**：脚本不钉死 openclaw 版本——升级目标、版本号、schema 声明全部从 **bundle 与 `bundle-manifest.json`** 读取，预检脚本还会断言这些契约在 Make/Install/Upgrade 三处一致。换版本只需**重新打一个包**（见 §3.2）。
 **本文性质**：设计文档。结论优先依据 openclaw 官方文档；官方未定义的部分单独标注为"工程补充"，未经实机验证的标注为"待验证"。
 **术语**：气隙机（air-gapped host）＝与互联网无任何链路、数据只能靠 U 盘搬运的机器；本项目目标机**内网可达**，所以"气隙"只否决"安装时回源"的设计，不否决局域网内访问（见 [README §2.3](../README.md#23-网络)）。
 
@@ -22,7 +23,8 @@
 3. **前提是安装"有主"**：updater 要求能从 npm 配置的 prefix + 已安装启动器推断出 owner `[文档]` `docs/cli/update.md:20-24`；否则记录为 **skipped**、退出 0、不升级 `[文档]` `docs/cli/update.md:33-37`。我们现在的 `C:\OpenClaw\app` 是 robocopy 过来的全局 prefix，默认情况下 npm 的全局 prefix 指向别处 —— `[实测]` 在 macOS 上撞到 `global-install-foreign-destination`；用 `NPM_CONFIG_PREFIX` 对齐到该树后 dry-run 立即通过。
 4. **本次升级的一个硬性顺序**：目标机是 2026.9.5，而"9.5 的 Gateway 没有安装替换监听器"，第一跳必须**先停 Gateway 并等它退出**，再 update，再启动 `[文档]` `docs/cli/update/how-updates-run.md:848-852`。
 5. **升级前必须有恢复点，而且这次是唯一回滚路径**：`update` 自带的只是"升级前配置副本"，不是全量恢复点 `[文档]` `docs/install/updating/rollback-and-recovery.md:276-277`；DB/config 迁移是单向的 `[文档]` `docs/reference/database-schemas/integrity-and-recovery.md:516`。
-6. **本次升级确认跨数据库 schema 迁移（已实证）**：9.5 声明 `state 17 / agent 21`，9.9 声明 `state 19 / agent 24`；9.5 建的 state 库 `user_version=17`，被 9.9 打开后变 `19`，随后 9.5 **拒绝打开**该库。**所以升级后"换回旧包"救不回来**，官方自动回滚也不适用，回滚 = 恢复升级前的 `backup create` 归档。详见 §2.8。
+6. **版本升级不需要改脚本**：唯一被钉死的只有“跨版本稳定”的契约（包名、目标平台、默认端口、Node 窗口、manifest schema），它们由预检脚本的跨文件断言守着；版本号、tarball、schemaVersions、原生包清单都是**读出来的**。2026.10.3 的逐条核对与构建实测见 §3.2。
+7. **本次升级确认跨数据库 schema 迁移（已实证）**：9.5 声明 `state 17 / agent 21`，9.9 声明 `state 19 / agent 24`；9.5 建的 state 库 `user_version=17`，被 9.9 打开后变 `19`，随后 9.5 **拒绝打开**该库。**所以升级后"换回旧包"救不回来**，官方自动回滚也不适用，回滚 = 恢复升级前的 `backup create` 归档。详见 §2.8。
 7. **顺手要关掉自动出网检查**：`update.checkOnStart` 默认 `true`，Gateway 每次启动 + 每 24h 请求 `https://telemetry.openclaw.ai/api/latest-version` `[文档]` `docs/gateway/config-runtime.md:140`；气隙机上应设 `false`（或 `OPENCLAW_NO_AUTO_UPDATE=1`）。
 8. **本次不需动 Node**：9.5 与 9.9 的 engines 完全相同 `>=24.16.0 <25 || >=26.1.0`，下限是 2026.9.3 引入的 `[文档]` `docs/install/node-compatibility.md:21,89`；目标机 nvm 的 26.7.0 继续有效。
 
@@ -105,7 +107,9 @@ openclaw --update          # 等价于 openclaw update
 - 升级/回滚前的推荐动作：由 supervisor 生成**无 sidecar 的 WAL 一致快照**，再用目标版本的 `openclaw database preflight <snapshot> --json` 判定（`exact` / `startup-repairable` / `migration-required` / `incompatible` / `indeterminate`）`[文档]` `docs/cli/gateway/restart-and-supervision.md:178`、`docs/reference/database-schemas/storage-changes.md:2016-2051`。
 - 不要只拷主 `.sqlite`（WAL）`[文档]` `docs/install/updating/rollback-and-recovery.md:78-81`；不要手改 `user_version` / `schema_meta.schema_version` `[文档]` `docs/reference/database-schemas/integrity-and-recovery.md:580-582`。
 
-**本次升级（9.5 → 9.9）已实证跨 schema 迁移** `[实测]`：
+**schema 链逐版递增**：9.5 = `state 17 / agent 21` → 9.9 = `state 19 / agent 24` → **2026.10.3 = `state 20 / agent 24`** `[实测]`（后者读自 10.3 的 `package.json`）。目标机的 17 会在一跳内前向迁到目标版本，回滚仍只能靠升级前备份。
+
+**本次升级已实证跨 schema 迁移** `[实测]`：
 
 | 观测 | 结果 |
 | --- | --- |
@@ -189,11 +193,39 @@ openclaw --update          # 等价于 openclaw update
 
 ---
 
+### 3.2 2026.10.3 核对结果（新版发布后重跑，脚本零改动）
+
+发布线变动：`latest` 由 `2026.9.9` → **`2026.10.3`**（`beta` = `2026.10.5-beta.3`，`extended-stable` 仍为 `2026.8.35`）。
+用 `npm view` 元数据 + 真实 tarball（102.9 MB）逐条核对脚本依赖的契约：
+
+| 契约 | 2026.9.9 | 2026.10.3 | 影响 |
+| --- | --- | --- | --- |
+| `engines.node` | `>=24.16.0 <25 \|\| >=26.1.0` | **相同** | 脚本里的 Node 窗口常量不用改 |
+| `bin` | `openclaw` → `openclaw.mjs` | **相同** | 启动器探测逻辑不变 |
+| `openclaw.updateAdmissionProtocol` | 1 | **1** | first-hop 判定协议未变 |
+| `openclaw.schemaVersions` | state 19 / agent 24 | **state 20 / agent 24** | 9.5 的 state 17 一跳迁到 20；回滚仍只能靠备份（§2.8） |
+| `docs/` 随包发布 | 有 | **有**（tar 内 1303 项，构建侧抽出 1296 篇 markdown） | npmcache 模式的文档抽取仍可用 |
+| 脚本用到的 27 个 CLI 参数/命令 | — | **全部存在** | 安装/升级流程无需改；`global-install-foreign-destination`、`update.checkOnStart`、`newer schema version`、`update repair` 均在 |
+| CHANGELOG | — | **无破坏性变更、无配置迁移要求** | 另有数条正好有利于本部署：防止升级中误判 owner 丢失、Windows 计划任务账号与短路径修复、npm 全局升级不再残留无关包 |
+
+**构建侧实测（本次，macOS）**：`Make-OpenClawOfflineBundle.ps1 -Mode npmcache -OpenClawVersion 2026.10.3` **零改动跑通**（exit 0）。
+产物 **439 MB**：`npm-cache` 320 MB + `openclaw-2026.10.3.tgz` 98 MB + `docs` 20 MB / 1296 页；manifest 记录
+`schemaVersions {state:20, agent:24}`、`nativePackages` 7 个（`@esbuild/win32-x64`、`@koromix/koffi-win32-x64`、
+`@lydell/node-pty-win32-x64`、`@openclaw/fs-safe-win32-x64-msvc`、`@trycua/cua-driver-win32-x64-msvc`、
+`@ubjs/node-win32-x64-msvc`、`sqlite-vec-windows-x64`），tarball SHA256 与 manifest 自校验一致。
+
+**阶梯升级仍按官方要求**：新版文档依然要求“2026 年 7 月之前的安装先经 `2026.9.5`”（`docs/install/updating.md:30`）；
+目标机现装就是 9.5 → **直接升 10.3 就是文档路径**，不必先经 9.9。
+
+> 本次实跑同时修掉了 npmcache 路径上 4 个隐藏缺陷（见 §6.1 前四行）；`-Mode app` 仍必须在 Windows x64 上构建。
+
+---
+
 ## 4. 已定决策
 
 | 项 | 决定 |
 | --- | --- |
-| 通道 | `stable`，本次升到 **2026.9.9** |
+| 通道 | `stable`，本次升到 **2026.10.3** |
 | 升级包形态 | **tarball + 为新版本预热的 npm cache**，另附完整整树作为救援/重装（**不能用于回滚**：跨 schema 后旧包起不来，见 §2.8） |
 | 目标机 npm | **允许执行**，但仅限升级脚本内部，且必须走随包 cache + 离线变量 |
 | 主路径 | 官方 `openclaw update --tag <本地 tarball 路径>` |
@@ -223,7 +255,7 @@ openclaw gateway stop                          # 必要时 --force
 
 # 3) 预演 + 判定
 $env:NPM_CONFIG_PREFIX = '<InstallRoot>\app'                          [文档] cli/update.md:29-31
-openclaw update --dry-run --yes --no-restart --tag D:\bundle\openclaw-2026.9.9.tgz
+openclaw update --dry-run --yes --no-restart --tag D:\bundle\openclaw-2026.10.3.tgz
 #   可选留证（已确认本次跨 schema 迁移，故不再是判定项）:
 openclaw database preflight <WAL一致快照>.sqlite --json               [文档] restart-and-supervision.md:178
 
@@ -232,7 +264,7 @@ $env:npm_config_cache   = 'D:\bundle\npm-cache'
 $env:npm_config_offline = 'true'
 
 # 4) 正式升级（不加 --no-restart，让 updater 处理重启阶段）
-openclaw update --yes --tag D:\bundle\openclaw-2026.9.9.tgz
+openclaw update --yes --tag D:\bundle\openclaw-2026.10.3.tgz
 
 # 5) Windows 收尾
 openclaw gateway install --force               # 重新生成计划任务 launcher  [文档] platforms/windows.md:170-171
@@ -273,6 +305,10 @@ openclaw backup restore <archive> --target <空目录>   # 回滚：本次唯一
 | **新增 `-Mode npmcache`** | 跨平台（含本 macOS 检出）只产出「预热 cache + tarball」：`npm --os=win32 --cpu=x64 --force --ignore-scripts` 预热，依赖脚本留给目标机；**不再无条件创建 `app\`**（否则安装侧的 mode 推断会误判） |
 | 跨平台 copy 派发 | `Invoke-CopyTree`：有 robocopy 用它（保持 >=8 失败的语义），否则 `Copy-Item` |
 | 平台包扫描 | 递归扫 `node_modules`（含 npm 嵌套布局），非 win32/windows-x64 的平台包**直接构建失败**，并记录 `nativePackages` |
+| **修：Unix 主机残留快照** | `Get-ResidueSnapshot` 直接读 `$env:USERPROFILE`/`$env:APPDATA`（Unix 上是 `$null`，`Join-Path` 是终止性绑定错误）→ 一次性解析 `$residueHome`/`$residueAppData`，预检加了负向断言 |
+| **修：npm 全局布局** | `npm -g --prefix` 在 Unix 上是 `<prefix>/lib/node_modules`，平台扫描却按 Windows 布局找 → 误报“0 个原生包”。新增 `Get-NpmGlobalModulesRoot` 探测两种布局 |
+| **修：空树字节统计** | 空管线的 `Measure-Object -Property Length -Sum` 返回 `$null`，StrictMode 下 `.Sum` 终止报错（npmcache 模式没有 app 树）→ 新增 `Get-TotalBytes` |
+| **修：manifest 元数据时序** | npmcache 模式先删 `_cachewarm`、后写 manifest，`schemaVersions` 落成 `null` → 改为删除前读取，并校验请求版本与落盘版本一致 |
 | bundle 自包含 | 把 `install.cmd`/`Install-*.ps1`/`upgrade.cmd`/`Upgrade-*.ps1`/`UPGRADE*.md` 拷进包根，双击即可零参数安装 |
 | 自带能力边界文档 | `docs\OFFLINE-CAPABILITIES.md` 随包交付；包内文档按模式取自 app 树或 tarball |
 | README.txt | 增"升级"段：tarball 路径、cache 路径、回滚只靠备份 |
