@@ -106,13 +106,20 @@ node -e "require('koffi'); console.log('koffi ok')"        # 原生模块能被�
 > 注：`openclaw --version` 可能在构建机上创建 `%USERPROFILE%\.openclaw`（构建机是自己的机器，无妨；
 > 末尾的残留检查会如实报告）。
 
-一条命令核对 1–8：
+**上面这些项 = 一条命令**。`Verify-OpenClawBundle.ps1` 会逐项打印 OK / FAIL，任何一项失败就以非 0 退出（它随包交付，构建机和目标机都能跑）：
 
 ```powershell
-$m = Get-Content .\bundle-manifest.json -Raw | ConvertFrom-Json
-$m | Format-List schemaVersion, mode, targetPlatform, openClawVersion, schemaVersions, nativePackages, packagedTarball
-(Get-FileHash ".\$($m.packagedTarball)" -Algorithm SHA256).Hash -eq $m.tarballSha256
+powershell -ExecutionPolicy Bypass -File .\Verify-OpenClawBundle.ps1
 ```
+
+脚本在组件目录里、要核对刚出的包时，加一个参数指到包目录：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Verify-OpenClawBundle.ps1 -BundleDir .\openclaw-offline-bundle
+```
+
+- 覆盖：manifest 字段 → tarball 哈希 → app 树文件数/字节数 → npm cache/app\ 模式一致性 → 记录的原生包是否都在位 → docs → 自包含清单 → **冒烟测试**（仅 app 模式 + win32-x64）。
+- `-SkipSmoke` 跳过冒烟测试（它会启动包内 CLI，可能在本机创建 `%USERPROFILE%\.openclaw`）。
 
 ## 5. 拷贝到 U 盘并交付
 
@@ -167,11 +174,12 @@ npm view openclaw version dist-tags engines bin openclaw --json
 
 1. `Test-OpenClawOfflineScripts.ps1` → `All checks passed.`
 2. §4 核对清单全过（尤其第 5、6、7、11 项）。
-3. U 盘上再核一次 tarball 哈希（拷贝会损坏文件）：
+3. **在目标机上**（U 盘拷贝完成后、安装之前）跑一次随包交付的校验脚本——它证明"拷贝没坏"，一条命令：
 
    ```powershell
-   $m = Get-Content E:\openclaw-offline-bundle\bundle-manifest.json -Raw | ConvertFrom-Json
-   (Get-FileHash "E:\openclaw-offline-bundle\$($m.packagedTarball)" -Algorithm SHA256).Hash -eq $m.tarballSha256
+   cd E:\openclaw-offline-bundle
+   Get-ChildItem -Recurse | Unblock-File
+   powershell -ExecutionPolicy Bypass -File .\Verify-OpenClawBundle.ps1
    ```
 
 4. 记下本次交付的版本与 tarball 哈希，连同 U 盘一起交接（目标机侧会把这行写进它的 `RECON.txt`）。

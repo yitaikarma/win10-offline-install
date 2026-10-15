@@ -644,7 +644,7 @@ if ("$bundleRoot$tarballName" -match ',') {
 # copied at build time, so there is never a hand-maintained second copy.
 foreach ($name in @('UPGRADE.md', 'UPGRADE-BRIEF.md',
                     'Install-OpenClawOffline.ps1', 'Upgrade-OpenClawOffline.ps1',
-                    'install.cmd', 'upgrade.cmd')) {
+                    'install.cmd', 'upgrade.cmd', 'Verify-OpenClawBundle.ps1')) {
     $docSrc = Join-Path $scriptDir $name
     if (Test-Path $docSrc) {
         Copy-Item -Path $docSrc -Destination (Join-Path $bundleRoot $name) -Force
@@ -848,8 +848,14 @@ On the air-gapped Windows 10 x64 host:
          nvm use 26.7.0
      openclaw needs >=24.16 <25 or >=26.1.
 
-  2. Unblock and install (double-click install.cmd, or):
+  2. Unblock the copied files first (USB media carries the Mark-of-the-Web, and PowerShell
+     refuses to run blocked scripts):
          Get-ChildItem -Recurse | Unblock-File
+
+  3. Verify the copy (proves the USB trip did not damage anything):
+         powershell -ExecutionPolicy Bypass -File .\Verify-OpenClawBundle.ps1
+
+  4. Install (double-click install.cmd, or):
          powershell -ExecutionPolicy Bypass -File .\Install-OpenClawOffline.ps1 -BundleDir <this folder> -BaseUrl http://<lan-llm>:<port>/v1 -ModelId <model-id>
 
 Do not rename app\ , docs\ , npm-cache\ or bundle-manifest.json.

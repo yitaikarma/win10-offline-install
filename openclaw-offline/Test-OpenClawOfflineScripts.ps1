@@ -173,7 +173,7 @@ $anchorExpectations = @{
     'Install:223-238' = 'Checking the Node runtime'
     'Install:298'     = 'needAllow'
     'Make:20-22'      = 'build on Windows x64'
-    'Make:852'        = 'Unblock-File'
+    'Make:853'        = 'Unblock-File'
     'Install:170-184' = "# mode 'app'"
 }
 
@@ -182,7 +182,8 @@ Section 'Cross-file contract'
 
 foreach ($name in @('Make-OpenClawOfflineBundle.ps1', 'Install-OpenClawOffline.ps1',
                     'Upgrade-OpenClawOffline.ps1', 'install.cmd', 'upgrade.cmd',
-                    'UPGRADE.md', 'UPGRADE-BRIEF.md', 'BUILD.md', 'docs\OFFLINE-CAPABILITIES.md')) {
+                    'UPGRADE.md', 'UPGRADE-BRIEF.md', 'BUILD.md', 'docs\OFFLINE-CAPABILITIES.md',
+                    'Verify-OpenClawBundle.ps1')) {
     if (Test-Path (Join-Path $bundleDir $name)) { Pass "$name present" } else { Fail "$name present" }
 }
 
@@ -212,7 +213,7 @@ Assert-Match 'Install-OpenClawOffline.ps1' '\[int\]\$GatewayPort\s*=\s*18789' 'i
 Assert-Match 'Upgrade-OpenClawOffline.ps1' '\[int\]\$GatewayPort\s*=\s*18789' 'upgrade defaults to the same gateway port'
 
 # The bundle must be self-contained: open it and double-click the entry points.
-foreach ($n in @('Install-OpenClawOffline.ps1', 'Upgrade-OpenClawOffline.ps1', 'install.cmd', 'upgrade.cmd')) {
+foreach ($n in @('Install-OpenClawOffline.ps1', 'Upgrade-OpenClawOffline.ps1', 'install.cmd', 'upgrade.cmd', 'Verify-OpenClawBundle.ps1')) {
     Assert-Match 'Make-OpenClawOfflineBundle.ps1' ([regex]::Escape("'$n'")) "make carries $n into the bundle"
 }
 
@@ -248,7 +249,8 @@ Assert-Match 'Make-OpenClawOfflineBundle.ps1' ([regex]::Escape("'^\d+\.\d+\.\d+'
 # StrictMode ('the variable cannot be retrieved'), and neither parsing nor the contract
 # patterns above can see that. Check the line order instead.
 foreach ($f in @('Make-OpenClawOfflineBundle.ps1', 'Install-OpenClawOffline.ps1',
-                 'Upgrade-OpenClawOffline.ps1', 'Test-OpenClawOfflineScripts.ps1')) {
+                 'Upgrade-OpenClawOffline.ps1', 'Test-OpenClawOfflineScripts.ps1',
+                 'Verify-OpenClawBundle.ps1')) {
     $lines = @(Get-Content -Path (Join-Path $bundleDir $f))
     $defineLine = 0
     $useLine = 0
@@ -266,7 +268,8 @@ foreach ($f in @('Make-OpenClawOfflineBundle.ps1', 'Install-OpenClawOffline.ps1'
 # string, and Split-Path/Join-Path then refuse it. Every script resolves a guarded
 # $scriptDir first and must never derive a path from a bare $PSScriptRoot.
 foreach ($f in @('Make-OpenClawOfflineBundle.ps1', 'Install-OpenClawOffline.ps1',
-                 'Upgrade-OpenClawOffline.ps1', 'Test-OpenClawOfflineScripts.ps1')) {
+                 'Upgrade-OpenClawOffline.ps1', 'Test-OpenClawOfflineScripts.ps1',
+                 'Verify-OpenClawBundle.ps1')) {
     Assert-Match $f '\$scriptDir\s*=\s*\$PSScriptRoot' "$f resolves its own directory defensively"
     Assert-NotMatch $f 'Split-Path -Parent \$PSScriptRoot' "$f never calls Split-Path on a bare PSScriptRoot"
     Assert-NotMatch $f 'Join-Path \$PSScriptRoot' "$f never calls Join-Path on a bare PSScriptRoot"

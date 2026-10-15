@@ -84,7 +84,7 @@
 - **安装根**：单一目录，默认 `C:\OpenClaw`；包内目录名固定（`app\`、`docs\`、`npm-cache\`），**不可重命名**。
 - **配置与日志**：集中在用户目录，如 `%USERPROFILE%\.openclaw\openclaw.json`、`%USERPROFILE%\.openclaw\logs`。
 - **监听约定**：本地服务默认绑 **loopback**，端口取高位（Gateway 用 `18789`，`ws://127.0.0.1:18789`）。
-- **传输介质**：U 盘/移动硬盘。**文件会带 MOTW，安装前必须 `Get-ChildItem -Recurse | Unblock-File`**（[Make:852](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L852)）。
+- **传输介质**：U 盘/移动硬盘。**文件会带 MOTW，安装前必须 `Get-ChildItem -Recurse | Unblock-File`**（[Make:853](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L853)）。
 - **体积敏感**：预构建 app 树实测 **574 MB（2026.9.5）/ 730 MB（2026.9.9）**；升级包另需 tarball（~98–114 MB）与预热 npm cache，升级期间磁盘峰值（stage + 救援整树）可能到 ~1.5 GB。`npmcache` 模式的整包实测 **439 MB**（2026.10.3：cache 320 + tarball 98 + docs 20）。拷贝前应能删掉 `_download\` 中间产物。
 - 磁盘余量、内存、机器名/序列号 ❓ 未记录。
 
@@ -125,6 +125,7 @@
 ├── install.cmd                  目标机：双击入口（纯 ASCII）
 ├── Upgrade-<组件>Offline.ps1    目标机：离线升级（可升级组件才有）
 ├── upgrade.cmd                  目标机：升级双击入口（纯 ASCII）
+├── Verify-<组件>Bundle.ps1      构建侧+目标机：**一条命令核对整包**（manifest/哈希/树/原生包/docs/冒烟）
 ├── Test-<组件>Scripts.ps1       构建侧：交付前预检（语法/ASCII/CRLF/锚点/跨文件契约）
 └── docs\OFFLINE-CAPABILITIES.md 组件：离线能力边界（构建时随 docs\ 进包）
 ```
@@ -132,7 +133,8 @@
 > 组件目录与 bundle 目录是两处，但 **bundle 必须自包含**：两个包的构建脚本都会把 `install.cmd` /
 > `Install-*.ps1` / `upgrade.cmd` / `Upgrade-*.ps1` / `UPGRADE.md` / `UPGRADE-BRIEF.md` 再拷一份进 bundle 根，
 > 这样目标机上"打开 bundle 目录双击 `install.cmd`（或 `upgrade.cmd`）"就能零参数工作（脚本默认
-> `BundleDir=$PSScriptRoot`）。脚本源头仍在组件目录，构建时复制，不存在两份手工维护的副本；预检脚本会断言这份携带清单。
+> `BundleDir=$PSScriptRoot`）。`Verify-*.ps1` 也随包交付，这样目标机在 `Unblock-File` 之后可以用**同一条命令**证明 U 盘拷贝没坏。
+> 脚本源头仍在组件目录，构建时复制，不存在两份手工维护的副本；预检脚本会断言这份携带清单。
 
 ### 3.2 硬性要求
 
