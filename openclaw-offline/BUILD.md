@@ -80,11 +80,31 @@ pwsh -File ./Make-OpenClawOfflineBundle.ps1 -Mode npmcache
 | 5 | `schemaVersions` | **非 null**（10.3 = `{state:20, agent:24}`）；为 null 说明 staging 元数据没读到，别交付 |
 | 6 | `nativePackages` | **非空**，且每项都是 `*-win32-x64*` / `*-windows-x64*`；10.3 实测 7 个：`@esbuild/win32-x64`、`@koromix/koffi-win32-x64`、`@lydell/node-pty-win32-x64`、`@openclaw/fs-safe-win32-x64-msvc`、`@trycua/cua-driver-win32-x64-msvc`、`@ubjs/node-win32-x64-msvc`、`sqlite-vec-windows-x64` |
 | 7 | `packagedTarball` / `tarballSha256` | 文件名是 `openclaw-<版本>.tgz`；用 `Get-FileHash -Algorithm SHA256` 核对一致 |
-| 8 | `appFileCount` / `appBytes`（仅 app 模式） | 与磁盘实际一致（安装侧复制后也会比对这两个值）；9.9 参考：41,406 文件 / ~730 MB |
+| 8 | `appFileCount` / `appBytes`（仅 app 模式） | 与磁盘实际一致（目标机复制后也会比对这两个值）。**Windows 实测**：2026.10.3 = **42,080 文件 / 482.1 MB**（9.9 的 41,406 / 730 MB 是 **macOS** 树，与 win32 树不可直接比） |
 | 9 | `docs\` | 有 `docs_map.md`；10.3 抽出 **1296 篇 markdown**（npmcache 模式从 tarball 解出） |
 | 10 | 自包含 | 包根有 `install.cmd` / `Install-OpenClawOffline.ps1` / `upgrade.cmd` / `Upgrade-OpenClawOffline.ps1` / `UPGRADE.md` / `UPGRADE-BRIEF.md` |
 | 11 | 没有中间产物 | 没有 `_download\`、没有 `_cachewarm\`、没有 `.app-complete`（npmcache 模式） |
-| 12 | 整包体积 | npmcache 439 MB（cache 320 + tarball 98 + docs 20）；app 模式 ≈ app 树 + 上述 |
+| 12 | 整包体积 | npmcache 439 MB（cache 320 + tarball 98 + docs 20）；app 模式 ≈ app 树（10.3 实测 482 MB）+ cache + tarball + docs |
+| 13 | **冒烟测试：在构建机上真的跑一遍整树** | 见 §4.1 —— 交付前唯一能证明"原生依赖真的可用"的检查 |
+
+### 4.1 构建机冒烟测试（app 模式强烈建议）
+
+构建机与目标机同为 win32-x64、Node 版本也一致时，这一步的结论可以直接外推到目标机：
+
+```powershell
+cd F:\win10-offline-install\openclaw-offline\openclaw-offline-bundle
+.\app\openclaw.cmd --version                            # 期望输出 2026.10.3
+cd app
+node -e "require('koffi'); console.log('koffi ok')"        # 原生模块能被加载
+(Get-ChildItem .\node_modules -Recurse -Include *.node,*.dll -ErrorAction SilentlyContinue).Count   # 期望 > 0
+```
+
+任何一条抛 `Cannot find module` / `was compiled against a different Node.js version` /
+`is not a valid Win32 application` 都**不要交付**：说明依赖安装脚本没跑到，或 Node 版本/ABI 不符，
+目标机上一样会挂。
+
+> 注：`openclaw --version` 可能在构建机上创建 `%USERPROFILE%\.openclaw`（构建机是自己的机器，无妨；
+> 末尾的残留检查会如实报告）。
 
 一条命令核对 1–8：
 
@@ -98,7 +118,7 @@ $m | Format-List schemaVersion, mode, targetPlatform, openClawVersion, schemaVer
 
 1. **拷整个 bundle 目录**（不要只拷 `app\` 或 `npm-cache\`）：脚本、文档、manifest 都要在。
 2. 拷到 U 盘上的一个文件夹，例如 `E:\openclaw-offline-bundle\`。
-3. **不要拷** `_download\`（若存在）与 `_cachewarm\`（正常已删）。
+3. **不要拷**构建侧文件：`_download\`（下载/解包中间产物，若存在）、`_cachewarm\`（npmcache 模式的预热树，正常已删）、`.app-complete`（构建续跑标记，目标机不用）。这三者只在构建机有意义。
 4. 目标机插入 U 盘后：
    ```powershell
    cd E:\openclaw-offline-bundle
