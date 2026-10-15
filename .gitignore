@@ -9,3 +9,5 @@ _cachewarm/
 # whenever a pwsh 7 run is started there (e.g. by the preflight check on macOS).
 # Windows PowerShell 5.1, the target shell, does not create it.
 StartupProfileData-*
+# 一次性交接用的打包文件（不要让它们进版本库）
+openclaw-offline-*.zip
