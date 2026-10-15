@@ -32,7 +32,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot)
+    [string]$RepoRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,7 +60,24 @@ function Assert-NotMatch([string]$Name, [string]$Pattern, [string]$Label) {
     if ($text -match $Pattern) { Fail "$Label - $Name still matches /$Pattern/" } else { Pass $Label }
 }
 
-$bundleDir = $PSScriptRoot
+# Resolve this script's own directory WITHOUT trusting $PSScriptRoot: on some Windows
+# PowerShell hosts it binds as an empty string (inside a param() default, a script block or
+# a dot-sourced body), and Split-Path/Join-Path then refuse it with "cannot bind argument to
+# parameter 'Path' because it is an empty string". Fall back to the invocation path, then cwd.
+$scriptDir = $PSScriptRoot
+if (-not $scriptDir) {
+    # $MyInvocation.MyCommand can be a script block, which has no Path property at all, and
+    # reading a missing property is a TERMINATING error under Set-StrictMode - so probe first.
+    $myCommand = $MyInvocation.MyCommand
+    if ($myCommand -and $myCommand.PSObject.Properties['Path'] -and $myCommand.Path) {
+        $scriptDir = Split-Path -Parent $myCommand.Path
+    }
+}
+if (-not $scriptDir) { $scriptDir = (Get-Location).Path }
+if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $scriptDir }
+if (-not $RepoRoot) { $RepoRoot = $scriptDir }
+
+$bundleDir = $scriptDir
 $ps1Files = @(Get-ChildItem -Path $bundleDir -Filter '*.ps1' -File | Sort-Object Name)
 $cmdFiles = @(Get-ChildItem -Path $bundleDir -Filter '*.cmd' -File | Sort-Object Name)
 $deliverables = @($ps1Files + $cmdFiles)
@@ -149,15 +166,15 @@ foreach ($file in $deliverables) {
 # the failure this catches. When a script grows or shrinks, recompute the README anchors
 # and update this table in the same change.
 $anchorExpectations = @{
-    'Install:176-177' = 'PROCESSOR_ARCHITEW6432'
-    'Make:338-340'    = 'OSArchitecture'
-    'Install:532'     = 'Installing the Gateway service'
-    'Install:443-457' = 'CheckEndpoint'
-    'Install:211-226' = 'Checking the Node runtime'
-    'Install:286'     = 'needAllow'
+    'Install:188-189' = 'PROCESSOR_ARCHITEW6432'
+    'Make:353-355'    = 'OSArchitecture'
+    'Install:544'     = 'Installing the Gateway service'
+    'Install:455-469' = 'if \(\$CheckEndpoint\) \{'
+    'Install:223-238' = 'Checking the Node runtime'
+    'Install:298'     = 'needAllow'
     'Make:20-22'      = 'build on Windows x64'
-    'Make:817'        = 'Unblock-File'
-    'Install:158-172' = 'Get-Prop \$manifest'
+    'Make:832'        = 'Unblock-File'
+    'Install:170-184' = "# mode 'app'"
 }
 
 # ---------------------------------------------------------------- cross-file contract
@@ -224,6 +241,18 @@ Assert-NotMatch 'Make-OpenClawOfflineBundle.ps1' 'Join-Path \$env:USERPROFILE' '
 Assert-NotMatch 'Make-OpenClawOfflineBundle.ps1' 'Join-Path \$env:APPDATA' 'make never builds a path from $env:APPDATA (null on Unix)'
 Assert-Match 'Make-OpenClawOfflineBundle.ps1' 'Invoke-NpmRetry' 'make retries npm installs (flaky or proxied build links)'
 
+# $PSScriptRoot is not a reliable way to find the script directory on every Windows
+# PowerShell host - inside a param() default or a script block it can bind as an empty
+# string, and Split-Path/Join-Path then refuse it. Every script resolves a guarded
+# $scriptDir first and must never derive a path from a bare $PSScriptRoot.
+foreach ($f in @('Make-OpenClawOfflineBundle.ps1', 'Install-OpenClawOffline.ps1',
+                 'Upgrade-OpenClawOffline.ps1', 'Test-OpenClawOfflineScripts.ps1')) {
+    Assert-Match $f '\$scriptDir\s*=\s*\$PSScriptRoot' "$f resolves its own directory defensively"
+    Assert-NotMatch $f 'Split-Path -Parent \$PSScriptRoot' "$f never calls Split-Path on a bare PSScriptRoot"
+    Assert-NotMatch $f 'Join-Path \$PSScriptRoot' "$f never calls Join-Path on a bare PSScriptRoot"
+    Assert-NotMatch $f '\$[Bb]undleDir = \$PSScriptRoot' "$f never assigns the bundle dir from a bare PSScriptRoot"
+}
+
 # ---------------------------------------------------------------- README anchors
 Section 'README line anchors'
 $readmePath = Join-Path $RepoRoot 'README.md'
@@ -252,6 +281,12 @@ if (-not (Test-Path $readmePath)) {
             $range = ($lines[($start - 1)..($end - 1)]) -join "`n"
             if ($range -notmatch $anchorExpectations[$label]) {
                 Fail "README anchor '$label' no longer points at '$($anchorExpectations[$label])' - recompute the anchor"
+            } elseif ($lines[$start - 1] -notmatch $anchorExpectations[$label]) {
+                # The marker must sit on the anchor's FIRST line: that keeps every anchor
+                # mechanically recomputable (just locate the marker), and it catches a marker
+                # that matched an earlier occurrence elsewhere in the file - e.g. a param()
+                # switch instead of the block that actually uses it.
+                Fail "README anchor '$label' does not START at '$($anchorExpectations[$label])' - it probably points at an earlier occurrence"
             }
         }
     }

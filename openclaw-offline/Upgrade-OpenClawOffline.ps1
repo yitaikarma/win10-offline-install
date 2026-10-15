@@ -165,9 +165,21 @@ function Get-InstalledVersion([string]$Launcher) {
 # ---------------------------------------------------------------- verify bundle
 Write-Step 'Verifying the upgrade bundle'
 
-if (-not $BundleDir) {
-    if ($PSScriptRoot) { $BundleDir = $PSScriptRoot } else { $BundleDir = (Get-Location).Path }
+# Resolve this script's own directory WITHOUT trusting $PSScriptRoot: on some Windows
+# PowerShell hosts it binds as an empty string (inside a param() default, a script block or
+# a dot-sourced body), and Split-Path/Join-Path then refuse it with "cannot bind argument to
+# parameter 'Path' because it is an empty string". Fall back to the invocation path, then cwd.
+$scriptDir = $PSScriptRoot
+if (-not $scriptDir) {
+    # $MyInvocation.MyCommand can be a script block, which has no Path property at all, and
+    # reading a missing property is a TERMINATING error under Set-StrictMode - so probe first.
+    $myCommand = $MyInvocation.MyCommand
+    if ($myCommand -and $myCommand.PSObject.Properties['Path'] -and $myCommand.Path) {
+        $scriptDir = Split-Path -Parent $myCommand.Path
+    }
 }
+if (-not $scriptDir) { $scriptDir = (Get-Location).Path }
+if (-not $BundleDir) { $BundleDir = $scriptDir }
 $BundleDir = [System.IO.Path]::GetFullPath($BundleDir)
 $manifestPath = Join-Path $BundleDir 'bundle-manifest.json'
 if (-not (Test-Path $manifestPath)) { throw "bundle-manifest.json not found in $BundleDir" }

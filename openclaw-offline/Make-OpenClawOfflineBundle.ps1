@@ -81,6 +81,21 @@ $hostOsLabel    = if ($env:OS) { $env:OS } else { 'Unix' }
 $residueHome    = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($HOME) { $HOME } else { (Get-Location).Path }
 $residueAppData = if ($env:APPDATA) { $env:APPDATA } else { $residueHome }
 
+# Resolve this script's own directory WITHOUT trusting $PSScriptRoot: on some Windows
+# PowerShell hosts it binds as an empty string (inside a param() default, a script block or
+# a dot-sourced body), and Split-Path/Join-Path then refuse it with "cannot bind argument to
+# parameter 'Path' because it is an empty string". Fall back to the invocation path, then cwd.
+$scriptDir = $PSScriptRoot
+if (-not $scriptDir) {
+    # $MyInvocation.MyCommand can be a script block, which has no Path property at all, and
+    # reading a missing property is a TERMINATING error under Set-StrictMode - so probe first.
+    $myCommand = $MyInvocation.MyCommand
+    if ($myCommand -and $myCommand.PSObject.Properties['Path'] -and $myCommand.Path) {
+        $scriptDir = Split-Path -Parent $myCommand.Path
+    }
+}
+if (-not $scriptDir) { $scriptDir = (Get-Location).Path }
+
 # Windows PowerShell 5.1 does not reliably negotiate TLS 1.2, which makes HTTPS
 # downloads fail with "Could not create SSL/TLS secure channel".
 try {
@@ -610,7 +625,7 @@ if ("$bundleRoot$tarballName" -match ',') {
 foreach ($name in @('UPGRADE.md', 'UPGRADE-BRIEF.md',
                     'Install-OpenClawOffline.ps1', 'Upgrade-OpenClawOffline.ps1',
                     'install.cmd', 'upgrade.cmd')) {
-    $docSrc = Join-Path $PSScriptRoot $name
+    $docSrc = Join-Path $scriptDir $name
     if (Test-Path $docSrc) {
         Copy-Item -Path $docSrc -Destination (Join-Path $bundleRoot $name) -Force
         Write-Ok "carried $name"
@@ -632,7 +647,7 @@ $docsDst = Join-Path $bundleRoot 'docs'
 if (-not (Test-Path $docsDst)) { New-Item -ItemType Directory -Force -Path $docsDst | Out-Null }
 
 # Authored capability notes: the air-gapped host can read neither the repo nor the website.
-$authoredSrc = Join-Path $PSScriptRoot 'docs'
+$authoredSrc = Join-Path $scriptDir 'docs'
 if (Test-Path $authoredSrc) {
     $authoredRc = Invoke-CopyTree $authoredSrc $docsDst
     if ($authoredRc -ge 8) { Write-Note "authored docs copy failed (exit $authoredRc)" }

@@ -35,8 +35,8 @@
 | 项 | 值 |
 | --- | --- |
 | 系统 | Windows 10，64 位 |
-| 架构 | **x64 / AMD64 only**。安装脚本硬性校验 `PROCESSOR_ARCHITECTURE=AMD64`，其他架构直接 `throw`（[Install:176-177](openclaw-offline/Install-OpenClawOffline.ps1#L176-L177)） |
-| Shell | **Windows PowerShell 5.1**（系统自带版本）。脚本刻意避开 PS7/.NET Core 专有 API，例如不用 `RuntimeInformation.OSArchitecture`（[Make:338-340](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L338-L340)） |
+| 架构 | **x64 / AMD64 only**。安装脚本硬性校验 `PROCESSOR_ARCHITECTURE=AMD64`，其他架构直接 `throw`（[Install:188-189](openclaw-offline/Install-OpenClawOffline.ps1#L188-L189)） |
+| Shell | **Windows PowerShell 5.1**（系统自带版本）。脚本刻意避开 PS7/.NET Core 专有 API，例如不用 `RuntimeInformation.OSArchitecture`（[Make:353-355](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L353-L355)） |
 | 具体 build 号 ❓ | 未锁定。脚本只校验 x64 + Win10 语义（`curl.exe` 需 1803+） |
 | 语言/区域 ❓ | 未锁定。脚本所有输出与 `.cmd` 均为 ASCII，规避 OEM 代码页问题 |
 
@@ -44,7 +44,7 @@
 
 - **目标机用户没有管理员权限**，或至少所有交付物都不得要求提权。
 - 由此确定的形态：
-  - 常驻服务不用 Windows Service，改用 **用户级计划任务**（[Install:532](openclaw-offline/Install-OpenClawOffline.ps1#L532)）。
+  - 常驻服务不用 Windows Service，改用 **用户级计划任务**（[Install:544](openclaw-offline/Install-OpenClawOffline.ps1#L544)）。
   - PATH 只改**用户级**：`[Environment]::SetEnvironmentVariable(..., 'User')`，不碰系统 PATH。
   - 不写 HKLM，不调用任何安装器级系统变更。
 
@@ -58,15 +58,15 @@
 | 局域网模型端点（OpenAI 兼容 HTTP） | `BaseUrl` 通常含版本段，可选 Bearer Key | `http://10.0.0.20:8000/v1`，模型 `qwen3-32b` |
 | 其他内网服务 ❓ | 未知，需要时登记 | — |
 
-- 端点探活方式：`GET <BaseUrl>/models`；**并非所有服务都暴露该路由，探测失败不视为安装失败**（[Install:443-457](openclaw-offline/Install-OpenClawOffline.ps1#L443-L457)）。
+- 端点探活方式：`GET <BaseUrl>/models`；**并非所有服务都暴露该路由，探测失败不视为安装失败**（[Install:455-469](openclaw-offline/Install-OpenClawOffline.ps1#L455-L469)）。
 - 密钥处理：**不落明文配置**，走环境变量 + SecretRef（`{ source: "env", provider: "default", id: "LLM_KEY" }`）。
 
 ### 2.4 运行时与工具的存在性
 
 | 组件 | 目标机上是否已存在 | 约束 |
 | --- | --- | --- |
-| Node.js | **已有**，由 **nvm-windows** 管理 | 版本必须落在 **>=24.16 且 <25，或 >=26.1**（示例 `26.7.0`）。安装前必须在本 shell 已 `nvm use`（[Install:211-226](openclaw-offline/Install-OpenClawOffline.ps1#L211-L226)） |
-| npm | 随 Node 提供 | **11.16+ 出现 `--allow-scripts` 策略，但 11.x 默认只警告、依赖脚本仍会执行；默认拒绝是 npm 12.0.0 起**。脚本对两者都传 `--allow-scripts`，故 12.x 必需、11.x 无害（[Install:286](openclaw-offline/Install-OpenClawOffline.ps1#L286)） |
+| Node.js | **已有**，由 **nvm-windows** 管理 | 版本必须落在 **>=24.16 且 <25，或 >=26.1**（示例 `26.7.0`）。安装前必须在本 shell 已 `nvm use`（[Install:223-238](openclaw-offline/Install-OpenClawOffline.ps1#L223-L238)） |
+| npm | 随 Node 提供 | **11.16+ 出现 `--allow-scripts` 策略，但 11.x 默认只警告、依赖脚本仍会执行；默认拒绝是 npm 12.0.0 起**。脚本对两者都传 `--allow-scripts`，故 12.x 必需、11.x 无害（[Install:298](openclaw-offline/Install-OpenClawOffline.ps1#L298)） |
 | `robocopy.exe` | 系统自带 | 可放心使用；**退出码 >= 8 才算失败** |
 | `curl.exe` | 不保证 | 仅构建侧依赖（Win10 1803+ 自带） |
 
@@ -84,7 +84,7 @@
 - **安装根**：单一目录，默认 `C:\OpenClaw`；包内目录名固定（`app\`、`docs\`、`npm-cache\`），**不可重命名**。
 - **配置与日志**：集中在用户目录，如 `%USERPROFILE%\.openclaw\openclaw.json`、`%USERPROFILE%\.openclaw\logs`。
 - **监听约定**：本地服务默认绑 **loopback**，端口取高位（Gateway 用 `18789`，`ws://127.0.0.1:18789`）。
-- **传输介质**：U 盘/移动硬盘。**文件会带 MOTW，安装前必须 `Get-ChildItem -Recurse | Unblock-File`**（[Make:817](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L817)）。
+- **传输介质**：U 盘/移动硬盘。**文件会带 MOTW，安装前必须 `Get-ChildItem -Recurse | Unblock-File`**（[Make:832](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L832)）。
 - **体积敏感**：预构建 app 树实测 **574 MB（2026.9.5）/ 730 MB（2026.9.9）**；升级包另需 tarball（~98–114 MB）与预热 npm cache，升级期间磁盘峰值（stage + 救援整树）可能到 ~1.5 GB。`npmcache` 模式的整包实测 **439 MB**（2026.10.3：cache 320 + tarball 98 + docs 20）。拷贝前应能删掉 `_download\` 中间产物。
 - 磁盘余量、内存、机器名/序列号 ❓ 未记录。
 
@@ -154,7 +154,7 @@
 | `app` | 预构建好的完整应用树 | **仅 Windows x64**（原生依赖架构绑定） |
 | `npmcache` | 只带 npm 缓存，目标机跑 `npm install --offline` | 任意平台（含本 macOS 检出） |
 
-安装脚本按 manifest 的 `mode` 字段分派，缺省时按是否存在 `app\` 推断（[Install:158-172](openclaw-offline/Install-OpenClawOffline.ps1#L158-L172)）。
+安装脚本按 manifest 的 `mode` 字段分派，缺省时按是否存在 `app\` 推断（[Install:170-184](openclaw-offline/Install-OpenClawOffline.ps1#L170-L184)）。
 
 ---
 
@@ -186,6 +186,7 @@
 | 20 | 平台包**命名不统一**，按固定模式探测会漏判 | 实测到的四种写法都必须覆盖：`koffi-darwin-arm64`（后缀）、`@esbuild/darwin-arm64`（scoped、无前导横线）、`sqlite-vec-windows-x64`（**windows** 而非 `win32`）、`node-addon-require-builtin-win32-x64-msvc`（带 `-msvc` 后缀）。构建侧扫描须匹配 `(^\|[-/])(win32\|windows\|darwin\|linux\|…)-(x64\|arm64\|…)(-\|$)`，且必须**递归**（见陷阱 17） |
 | 21 | `openclaw backup create --output <路径>` 的语义取决于该路径**是否已存在** | 指向已存在目录 → 在里面生成带时间戳的 `*.tar.gz`（官方配方先 `mkdir` 就是这个原因）；指向不存在的路径 → 该路径被当成**归档文件本身**（生成一个没有扩展名的文件）。且 `backup restore` **从不就地恢复**、目标必须是空目录 |
 | 22 | 构建脚本直接读 `$env:USERPROFILE` / `$env:APPDATA` | 在 Unix 构建机（npmcache 模式）上两者为 `$null`，`Join-Path $null ...` 是**参数绑定终止性错误**，脚本会死在"残留快照"那一步（实测踩到）。应一次性解析成 `$residueHome`/`$residueAppData`（`USERPROFILE` → `HOME` → 当前目录兜底），预检脚本对此有负向断言 |
+| 23 | 脚本用 `$PSScriptRoot` 定位自身目录 | 某些 Windows PowerShell 宿主里它在 `param()` 默认值 / 脚本块中绑成**空字符串**，`Split-Path` / `Join-Path` 直接报“参数为空字符串”（实测：构建机 F: 上第一次跑预检就挂）。四个脚本统一改为**在正文里**三级兜底解析 `$scriptDir`：`$PSScriptRoot` → `$MyInvocation.MyCommand.Path`（**必须先探测 `Path` 属性**：脚本块没有它，而 StrictMode 下读缺失属性是终止性错误）→ 当前目录；预检对此有正负向断言 |
 
 ---
 

@@ -114,6 +114,7 @@ $m | Format-List schemaVersion, mode, targetPlatform, openClawVersion, schemaVer
 | `No win32-x64 platform package was found under ...`（!! 提示） | 交叉预热没拉到可选依赖，或 prefix 布局异常 | 不要交付；检查网络/缓存后重跑。若持续出现，用 Windows x64 出 app 包 |
 | `npm install failed with exit code N` | 网络抖动/代理/registry 不可达 | 脚本已自动重试 3 次（退避 5/10s）；仍失败看 npm 原始输出（`DEPTH_ZERO_SELF_SIGNED_CERT` = TLS 中间人，换网络或给 npm 配好 CA） |
 | `EPERM` 且路径是 `~/.npm` | 构建机 npm 默认 cache 被 root 占过（陷阱 19） | 设 `$env:npm_config_cache = 'D:\npmcache-tmp'` 后重跑；**不要** `sudo chown` 用户目录 |
+| `Split-Path : 无法将参数绑定到参数"Path"，因为该参数为空字符串`（或任何 `$PSScriptRoot`/`Join-Path` 空参报错） | 某些 Windows PowerShell 宿主里 `$PSScriptRoot` 在 `param()` 默认值 / 脚本块里会绑成**空串**，`Split-Path` 因而拒绝 | 已修（四个脚本统一改为在**正文**里解析 `$scriptDir`：`$PSScriptRoot` → `$MyInvocation.MyCommand.Path` → 当前目录）。若你的副本仍在报：`git pull` 或重新拷贝这四个脚本 |
 | `Cannot read the staged package metadata ...` | staging 树不完整（上次中断） | 重跑（可续跑）；仍失败加 `-Force` 清空重建 |
 | `Staged tree drifted: requested X but ... Y` | npm 落盘的版本与请求不一致 | 检查 `-OpenClawVersion` 写对；必要时清空重建 |
 | `Expand-Archive`/Node 相关失败（仅 `-IncludeNode`） | Node zip 下载不完整 | 删掉该 zip 重跑（断点续传），或省略 `-IncludeNode` |
