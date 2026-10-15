@@ -36,7 +36,7 @@
 | --- | --- |
 | 系统 | Windows 10，64 位 |
 | 架构 | **x64 / AMD64 only**。安装脚本硬性校验 `PROCESSOR_ARCHITECTURE=AMD64`，其他架构直接 `throw`（[Install:188-189](openclaw-offline/Install-OpenClawOffline.ps1#L188-L189)） |
-| Shell | **Windows PowerShell 5.1**（系统自带版本）。脚本刻意避开 PS7/.NET Core 专有 API，例如不用 `RuntimeInformation.OSArchitecture`（[Make:353-355](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L353-L355)） |
+| Shell | **Windows PowerShell 5.1**（系统自带版本）。脚本刻意避开 PS7/.NET Core 专有 API，例如不用 `RuntimeInformation.OSArchitecture`（[Make:362-364](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L362-L364)） |
 | 具体 build 号 ❓ | 未锁定。脚本只校验 x64 + Win10 语义（`curl.exe` 需 1803+） |
 | 语言/区域 ❓ | 未锁定。脚本所有输出与 `.cmd` 均为 ASCII，规避 OEM 代码页问题 |
 
@@ -84,7 +84,7 @@
 - **安装根**：单一目录，默认 `C:\OpenClaw`；包内目录名固定（`app\`、`docs\`、`npm-cache\`），**不可重命名**。
 - **配置与日志**：集中在用户目录，如 `%USERPROFILE%\.openclaw\openclaw.json`、`%USERPROFILE%\.openclaw\logs`。
 - **监听约定**：本地服务默认绑 **loopback**，端口取高位（Gateway 用 `18789`，`ws://127.0.0.1:18789`）。
-- **传输介质**：U 盘/移动硬盘。**文件会带 MOTW，安装前必须 `Get-ChildItem -Recurse | Unblock-File`**（[Make:832](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L832)）。
+- **传输介质**：U 盘/移动硬盘。**文件会带 MOTW，安装前必须 `Get-ChildItem -Recurse | Unblock-File`**（[Make:847](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L847)）。
 - **体积敏感**：预构建 app 树实测 **574 MB（2026.9.5）/ 730 MB（2026.9.9）**；升级包另需 tarball（~98–114 MB）与预热 npm cache，升级期间磁盘峰值（stage + 救援整树）可能到 ~1.5 GB。`npmcache` 模式的整包实测 **439 MB**（2026.10.3：cache 320 + tarball 98 + docs 20）。拷贝前应能删掉 `_download\` 中间产物。
 - 磁盘余量、内存、机器名/序列号 ❓ 未记录。
 

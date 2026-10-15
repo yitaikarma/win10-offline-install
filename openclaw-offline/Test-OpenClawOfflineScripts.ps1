@@ -167,13 +167,13 @@ foreach ($file in $deliverables) {
 # and update this table in the same change.
 $anchorExpectations = @{
     'Install:188-189' = 'PROCESSOR_ARCHITEW6432'
-    'Make:353-355'    = 'OSArchitecture'
+    'Make:362-364'    = 'OSArchitecture'
     'Install:544'     = 'Installing the Gateway service'
     'Install:455-469' = 'if \(\$CheckEndpoint\) \{'
     'Install:223-238' = 'Checking the Node runtime'
     'Install:298'     = 'needAllow'
     'Make:20-22'      = 'build on Windows x64'
-    'Make:832'        = 'Unblock-File'
+    'Make:847'        = 'Unblock-File'
     'Install:170-184' = "# mode 'app'"
 }
 
@@ -240,6 +240,26 @@ Assert-Match 'Make-OpenClawOfflineBundle.ps1' '\$residueHome\s*=' 'make resolves
 Assert-NotMatch 'Make-OpenClawOfflineBundle.ps1' 'Join-Path \$env:USERPROFILE' 'make never builds a path from $env:USERPROFILE (null on Unix)'
 Assert-NotMatch 'Make-OpenClawOfflineBundle.ps1' 'Join-Path \$env:APPDATA' 'make never builds a path from $env:APPDATA (null on Unix)'
 Assert-Match 'Make-OpenClawOfflineBundle.ps1' 'Invoke-NpmRetry' 'make retries npm installs (flaky or proxied build links)'
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' '\$OutDir = Join-Path \$scriptDir' 'make defaults the output dir next to the script (cwd-independent)'
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' 'Could not resolve the latest' 'make fails loudly when npm view cannot resolve a version'
+Assert-Match 'Make-OpenClawOfflineBundle.ps1' ([regex]::Escape("'^\d+\.\d+\.\d+'")) 'make requires npm view to return an actual version'
+
+# Definition order: using $scriptDir before it is resolved would fail at runtime under
+# StrictMode ('the variable cannot be retrieved'), and neither parsing nor the contract
+# patterns above can see that. Check the line order instead.
+foreach ($f in @('Make-OpenClawOfflineBundle.ps1', 'Install-OpenClawOffline.ps1',
+                 'Upgrade-OpenClawOffline.ps1', 'Test-OpenClawOfflineScripts.ps1')) {
+    $lines = @(Get-Content -Path (Join-Path $bundleDir $f))
+    $defineLine = 0
+    $useLine = 0
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($defineLine -eq 0 -and $lines[$i] -match '^\$scriptDir\s*=\s*\$PSScriptRoot') { $defineLine = $i + 1 }
+        if ($useLine -eq 0 -and $lines[$i] -match '\$scriptDir' -and $lines[$i] -notmatch '^\$scriptDir\s*=') { $useLine = $i + 1 }
+    }
+    if ($defineLine -eq 0) { Fail "$f never resolves `$scriptDir" }
+    elseif ($useLine -gt 0 -and $useLine -lt $defineLine) { Fail "$f uses `$scriptDir on line $useLine before it is resolved on line $defineLine" }
+    else { Pass "$f resolves `$scriptDir before its first use" }
+}
 
 # $PSScriptRoot is not a reliable way to find the script directory on every Windows
 # PowerShell host - inside a param() default or a script block it can bind as an empty

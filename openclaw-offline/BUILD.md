@@ -7,10 +7,14 @@
 
 | 我要什么 | 在哪台机器 | 命令 |
 | --- | --- | --- |
-| **app 包**（推荐交付：整树 + cache + tarball，也是升级失败的救援包） | **联网 Windows x64** | `powershell -ExecutionPolicy Bypass -File .\Make-OpenClawOfflineBundle.ps1 -OpenClawVersion 2026.10.3 -OutDir D:\oc-bundle` |
-| **npmcache 包**（只有 cache + tarball，体积小；依赖脚本留给目标机跑） | 任意平台（Windows / macOS / Linux 都行） | `pwsh -File ./Make-OpenClawOfflineBundle.ps1 -Mode npmcache -OpenClawVersion 2026.10.3 -OutDir ./oc-bundle` |
+| **app 包**（推荐交付：整树 + cache + tarball，也是升级失败的救援包） | **联网 Windows x64** | `powershell -ExecutionPolicy Bypass -File .\Make-OpenClawOfflineBundle.ps1` |
+| **npmcache 包**（只有 cache + tarball，体积小；依赖脚本留给目标机跑） | 任意平台（Windows / macOS / Linux 都行） | `powershell -ExecutionPolicy Bypass -File .\Make-OpenClawOfflineBundle.ps1 -Mode npmcache`<br>（macOS/Linux 把 `powershell` 换成 `pwsh`，路径分隔符用 `/`） |
 
-出包前必做：`Test-OpenClawOfflineScripts.ps1` **全绿**（只读，不装任何东西）。交付前按 §4 核对产物。
+**两条命令都不需要别的参数**：
+
+- 版本省略 = 取 npm `latest`（当前 `2026.10.3`）；要固定版本才加 `-OpenClawVersion`。
+- 输出省略 = 落在**本包目录**下的 `openclaw-offline-bundle\`（跟着脚本走，与当前目录无关），已在 `.gitignore` 中，不会污染 git。
+- 出包前必做：`Test-OpenClawOfflineScripts.ps1` **全绿**（只读，不装任何东西）。交付前按 §4 核对产物。
 
 ## 1. 前置条件
 
@@ -24,7 +28,7 @@
 | PowerShell | Windows：**5.1**；macOS/Linux：`pwsh` 7 | 脚本只用 PS 5.1 语法面，两边都能跑 |
 | 网络 | `registry.npmjs.org`（必需）；`nodejs.org`（仅 `-IncludeNode`） | 全程只读上游，不写任何 registry |
 | 磁盘 | **≥3 GB 空闲**（app 树 ~730 MB + cache ~320 MB + tarball ~100 MB + docs 20 MB + 下载/解包临时） | 升级期间目标机峰值另算，见目标机文档 |
-| 输出目录 | **用短路径**，如 `D:\oc-bundle` | npm 11 的嵌套 `node_modules` 路径很深，长路径会踩 MAX_PATH；脚本会拒绝盘根 |
+| 输出目录 | 默认 = 本包目录下的 `openclaw-offline-bundle\`（跟着脚本走，已 git 忽略），无需指定 | 只有想放别处才加 `-OutDir`：**用短路径**（如 `D:\oc-bundle`）。npm 11 的嵌套 `node_modules` 路径很深，长路径会踩 MAX_PATH；脚本会拒绝盘根 |
 
 ## 2. 步骤 A：Windows x64 出 **app 包**（推荐）
 
@@ -37,15 +41,15 @@ npm view openclaw version engines bin openclaw --json
 # (2) 交付前预检（只读；必须全绿）
 powershell -ExecutionPolicy Bypass -File .\Test-OpenClawOfflineScripts.ps1
 
-# (3) 构建
-powershell -ExecutionPolicy Bypass -File .\Make-OpenClawOfflineBundle.ps1 `
-    -OpenClawVersion 2026.10.3 `
-    -OutDir D:\oc-bundle
+# (3) 构建（无参数：版本取 npm latest，输出到本包目录下的 openclaw-offline-bundle\）
+powershell -ExecutionPolicy Bypass -File .\Make-OpenClawOfflineBundle.ps1
 
-# (3b) 不想让目标机自带 Node（目标机用 nvm 管理）就保持默认；
-#      要连便携 Node 一起打包（离线机器上没有 Node 时用）：
-# powershell -ExecutionPolicy Bypass -File .\Make-OpenClawOfflineBundle.ps1 -OpenClawVersion 2026.10.3 -OutDir D:\oc-bundle -IncludeNode
+# (3b) 要连便携 Node 一起打包（目标机上没有 Node 时用）：
+# powershell -ExecutionPolicy Bypass -File .\Make-OpenClawOfflineBundle.ps1 -IncludeNode
 ```
+
+> 只有需要**固定版本**或**换输出目录**时才加参数，例如固定到保守线并放到 D 盘：
+> `powershell -ExecutionPolicy Bypass -File .\Make-OpenClawOfflineBundle.ps1 -OpenClawVersion 2026.9.33 -OutDir D:\oc-bundle`
 
 构建过程依次做：解析版本 → 建 staging → `npm install -g openclaw@<版本>`（**app 模式在构建机上跑完依赖安装脚本**）→ 探测启动器 → `npm pack` 出 tarball → 拷文档 → 平台包扫描 → 写 manifest → 残留检查。
 **exit 0 + 末尾打印 "Bundle ready" 才算成功。**
@@ -54,10 +58,10 @@ powershell -ExecutionPolicy Bypass -File .\Make-OpenClawOfflineBundle.ps1 `
 
 ```powershell
 # Windows（PowerShell 5.1）
-powershell -ExecutionPolicy Bypass -File .\Make-OpenClawOfflineBundle.ps1 -Mode npmcache -OpenClawVersion 2026.10.3 -OutDir D:\oc-cache-bundle
+powershell -ExecutionPolicy Bypass -File .\Make-OpenClawOfflineBundle.ps1 -Mode npmcache
 
 # macOS / Linux（pwsh 7）
-pwsh -File ./Make-OpenClawOfflineBundle.ps1 -Mode npmcache -OpenClawVersion 2026.10.3 -OutDir ./oc-cache-bundle
+pwsh -File ./Make-OpenClawOfflineBundle.ps1 -Mode npmcache
 ```
 
 与 app 模式的差别：
@@ -114,6 +118,7 @@ $m | Format-List schemaVersion, mode, targetPlatform, openClawVersion, schemaVer
 | `No win32-x64 platform package was found under ...`（!! 提示） | 交叉预热没拉到可选依赖，或 prefix 布局异常 | 不要交付；检查网络/缓存后重跑。若持续出现，用 Windows x64 出 app 包 |
 | `npm install failed with exit code N` | 网络抖动/代理/registry 不可达 | 脚本已自动重试 3 次（退避 5/10s）；仍失败看 npm 原始输出（`DEPTH_ZERO_SELF_SIGNED_CERT` = TLS 中间人，换网络或给 npm 配好 CA） |
 | `EPERM` 且路径是 `~/.npm` | 构建机 npm 默认 cache 被 root 占过（陷阱 19） | 设 `$env:npm_config_cache = 'D:\npmcache-tmp'` 后重跑；**不要** `sudo chown` 用户目录 |
+| `Could not resolve the latest openclaw version from npm (npm exit 1)` | 同上：解析 `latest` 调的 `npm view` 走的是 npm **默认** cache（此时包内 cache 还不存在） | 与上一行同样处置；或干脆 `-OpenClawVersion <版本>` 固定版本（脚本对 `npm view` 的输出做了版本号形状校验，不会再拿报错文本当版本） |
 | `Split-Path : 无法将参数绑定到参数"Path"，因为该参数为空字符串`（或任何 `$PSScriptRoot`/`Join-Path` 空参报错） | 某些 Windows PowerShell 宿主里 `$PSScriptRoot` 在 `param()` 默认值 / 脚本块里会绑成**空串**，`Split-Path` 因而拒绝 | 已修（四个脚本统一改为在**正文**里解析 `$scriptDir`：`$PSScriptRoot` → `$MyInvocation.MyCommand.Path` → 当前目录）。若你的副本仍在报：`git pull` 或重新拷贝这四个脚本 |
 | `Cannot read the staged package metadata ...` | staging 树不完整（上次中断） | 重跑（可续跑）；仍失败加 `-Force` 清空重建 |
 | `Staged tree drifted: requested X but ... Y` | npm 落盘的版本与请求不一致 | 检查 `-OpenClawVersion` 写对；必要时清空重建 |

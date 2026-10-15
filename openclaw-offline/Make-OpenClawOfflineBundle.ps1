@@ -34,6 +34,10 @@
                included) because the warming pins --os win32 --cpu x64 and leaves the
                dependency install scripts to the target (--ignore-scripts).
 
+.PARAMETER OutDir
+    Where to build the bundle. Default: openclaw-offline-bundle\ next to this script
+    (git-ignored). Use a SHORT absolute path on Windows - npm 11 nests node_modules deeply.
+
 .PARAMETER KeepStaging
     Keep the _cachewarm\ staging tree in npmcache mode (diagnostics only; delete it
     before copying the bundle to USB).
@@ -43,7 +47,7 @@
     Build host: Windows x64, full app tree + warm cache.
 
 .EXAMPLE
-    .\Make-OpenClawOfflineBundle.ps1 -Mode npmcache -OpenClawVersion 2026.9.9 -OutDir ./openclaw-offline-bundle
+    .\Make-OpenClawOfflineBundle.ps1 -Mode npmcache
     Build host: any platform (e.g. this macOS checkout), cache-only bundle.
 #>
 [CmdletBinding()]
@@ -52,7 +56,7 @@ param(
     [string]$OpenClawVersion = 'latest',
     [switch]$IncludeNode,
     [string]$NodeVersion = '',
-    [string]$OutDir = (Join-Path (Get-Location) 'openclaw-offline-bundle'),
+    [string]$OutDir,
     [switch]$KeepStaging,
     [switch]$Force
 )
@@ -81,6 +85,7 @@ $hostOsLabel    = if ($env:OS) { $env:OS } else { 'Unix' }
 $residueHome    = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($HOME) { $HOME } else { (Get-Location).Path }
 $residueAppData = if ($env:APPDATA) { $env:APPDATA } else { $residueHome }
 
+
 # Resolve this script's own directory WITHOUT trusting $PSScriptRoot: on some Windows
 # PowerShell hosts it binds as an empty string (inside a param() default, a script block or
 # a dot-sourced body), and Split-Path/Join-Path then refuse it with "cannot bind argument to
@@ -95,6 +100,10 @@ if (-not $scriptDir) {
     }
 }
 if (-not $scriptDir) { $scriptDir = (Get-Location).Path }
+
+# Default output: next to these scripts, not relative to the current directory, so the
+# bundle always lands in the component folder regardless of where the shell happens to be.
+if (-not $OutDir) { $OutDir = Join-Path $scriptDir 'openclaw-offline-bundle' }
 
 # Windows PowerShell 5.1 does not reliably negotiate TLS 1.2, which makes HTTPS
 # downloads fail with "Could not create SSL/TLS secure channel".
@@ -405,8 +414,14 @@ Write-Ok "Baseline: .openclaw=$($residueBefore.OpenClawState), npm-global-dir=$(
 Write-Step 'Resolving versions'
 
 if ($OpenClawVersion -eq 'latest') {
+    # npm view goes through npm's DEFAULT cache (the bundle cache does not exist yet), and a
+    # root-owned ~/.npm is a known failure on build machines. Never trust the output blindly:
+    # check the exit code and require something that actually looks like a version.
     $viewProbe = Invoke-NpmRetry -Arguments @('view', $OpenClawPackage, 'version')
-    $resolvedOpenClaw = "$($viewProbe.Lines | Select-Object -Last 1)".Trim()
+    $resolvedOpenClaw = "$(@($viewProbe.Lines | Where-Object { "$_" -match '^\d+\.\d+\.\d+' }) | Select-Object -Last 1)".Trim()
+    if ($viewProbe.ExitCode -ne 0 -or -not ($resolvedOpenClaw -match '^\d+\.\d+\.\d+')) {
+        throw "Could not resolve the latest $OpenClawPackage version from npm (npm exit $($viewProbe.ExitCode)). Fix npm registry/cache access (BUILD.md section 6 - a root-owned npm cache is the usual cause) or pin the version: -OpenClawVersion <version>."
+    }
 } else {
     $resolvedOpenClaw = $OpenClawVersion
 }
