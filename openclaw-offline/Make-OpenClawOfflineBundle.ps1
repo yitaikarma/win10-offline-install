@@ -850,6 +850,7 @@ Get-ChildItem -Path $bundleRoot -Force | Where-Object { $_.Name -notin @('_downl
     ForEach-Object { Write-Host ("  {0,-22} {1}" -f $_.Name, $(if ($_.PSIsContainer) { '' } else { "$([math]::Round($_.Length/1KB,1)) KB" })) }
 Write-Host ''
 Write-Host 'Copy the folder (not the top-level folder itself into _download) to the air-gapped host.' -ForegroundColor Green
+Write-Host 'Next: check the bundle against BUILD.md section 4, then copy it to USB.' -ForegroundColor Green
 
 # ---------------------------------------------------------------- residue check
 Write-Step 'Residue check'

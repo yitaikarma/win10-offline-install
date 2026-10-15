@@ -119,6 +119,7 @@
 │   ├── bundle-manifest.json     版本 + SHA256 + 文件数/字节数（schemaVersion）
 │   ├── UPGRADE.md / UPGRADE-BRIEF.md  可升级组件：方案与目标机执行说明
 │   └── README.txt               面向目标机操作者的复制粘贴说明
+├── BUILD.md                     构建侧：**全步骤运行手册**（前置条件/命令/产物核对/故障处置/换版本核对）
 ├── Make-<组件>OfflineBundle.ps1 构建侧：联网打包（app 与 npmcache 两种模式）
 ├── Install-<组件>Offline.ps1    目标机：离线安装
 ├── install.cmd                  目标机：双击入口（纯 ASCII）
@@ -192,7 +193,7 @@
 
 | 包 | 覆盖内容 | 目标机入口 | 状态 |
 | --- | --- | --- | --- |
-| [openclaw-offline](openclaw-offline/) | OpenClaw CLI + Gateway（计划任务，端口 18789），可选便携 Node。不含桌面端与 WebView2，界面走浏览器 Control UI | 安装 [install.cmd](openclaw-offline/install.cmd) / 升级 [upgrade.cmd](openclaw-offline/upgrade.cmd) | 脚本完整；bundle 自包含；`app` 与 `npmcache` 两种模式；manifest schemaVersion 4（带 tarball/哈希/schemaVersions/原生包清单）；预检含跨文件契约。**未实机验证**：安装、升级、回滚、owner 判定。升级方案 [UPGRADE.md](openclaw-offline/UPGRADE.md)、目标机自决执行 [UPGRADE-BRIEF.md](openclaw-offline/UPGRADE-BRIEF.md)、预检 [Test-OpenClawOfflineScripts.ps1](openclaw-offline/Test-OpenClawOfflineScripts.ps1)、能力边界 [docs/OFFLINE-CAPABILITIES.md](openclaw-offline/docs/OFFLINE-CAPABILITIES.md) |
+| [openclaw-offline](openclaw-offline/) | OpenClaw CLI + Gateway（计划任务，端口 18789），可选便携 Node。不含桌面端与 WebView2，界面走浏览器 Control UI | 安装 [install.cmd](openclaw-offline/install.cmd) / 升级 [upgrade.cmd](openclaw-offline/upgrade.cmd) | 脚本完整；bundle 自包含；`app` 与 `npmcache` 两种模式；manifest schemaVersion 4（带 tarball/哈希/schemaVersions/原生包清单）；预检含跨文件契约。**未实机验证**：安装、升级、回滚、owner 判定。**构建步骤看 [BUILD.md](openclaw-offline/BUILD.md)**、升级方案 [UPGRADE.md](openclaw-offline/UPGRADE.md)、目标机自决执行 [UPGRADE-BRIEF.md](openclaw-offline/UPGRADE-BRIEF.md)、预检 [Test-OpenClawOfflineScripts.ps1](openclaw-offline/Test-OpenClawOfflineScripts.ps1)、能力边界 [docs/OFFLINE-CAPABILITIES.md](openclaw-offline/docs/OFFLINE-CAPABILITIES.md) |
 | [dsh-web-offline](dsh-web-offline/) | DeepSeek Harness **Web 版**（`dsh web`，默认 loopback 3080，用户级计划任务），内网 OpenAI 兼容端点配置。不含 Electron 桌面端 | 安装 [install.cmd](dsh-web-offline/install.cmd) / 升级 [upgrade.cmd](dsh-web-offline/upgrade.cmd) | 脚本完整；**版本化安装根**（`versions\<版本>` + `current.txt`）让回滚只改一行。npmcache 模式的 win32-x64 交叉预热 + 离线重装 + 离线 tgz 重装**已实测**；app 模式与实机安装**未验证**。升级方案 [UPGRADE.md](dsh-web-offline/UPGRADE.md)、目标机执行 [UPGRADE-BRIEF.md](dsh-web-offline/UPGRADE-BRIEF.md)、预检 [Test-DshWebOfflineScripts.ps1](dsh-web-offline/Test-DshWebOfflineScripts.ps1)、能力边界 [docs/OFFLINE-CAPABILITIES.md](dsh-web-offline/docs/OFFLINE-CAPABILITIES.md) |
 
 `openclaw-offline` 的细节（参数、配对流程、provider 模板）见脚本头部注释；它是第 2、3、4 节规范的**参考实现**，新增包时可以照抄结构。可升级组件的完整模式（构建侧产物、目标机升级流程、失败与回滚矩阵）见 [UPGRADE.md](openclaw-offline/UPGRADE.md)。
@@ -211,8 +212,9 @@
 6. 若该组件需要升级：按 3.2 第 8 条带 release tarball + 预热 cache，写 `Upgrade-<组件>Offline.ps1` 与 `upgrade.cmd`，流程与回滚声明照 [UPGRADE.md](openclaw-offline/UPGRADE.md) 的模式；`-DryRun` 必须零副作用。
 7. 让 bundle **自包含**：构建时把 `install.cmd` / `Install-*.ps1` / `upgrade.cmd` / `Upgrade-*.ps1` / `UPGRADE*.md` 拷进包根。
 8. 跨平台构建（如 npmcache 模式）：`--os/--cpu/--force` 钉平台 + `--ignore-scripts`，并用跨平台 copy 派发（robocopy 不可用时就 `Copy-Item`）。
-9. 写 `<组件>` 的预检脚本（可复制 `Test-OpenClawOfflineScripts.ps1` 的检查项：解析/5.1 语法面/ASCII/CRLF/锚点内容/**跨文件契约**），**全绿再打包**。
-10. 补第 4 节表格里新踩到的坑。
-11. 把新包登记进第 5 节表格。
+9. 写 `BUILD.md`：面向构建机的全步骤手册（前置条件表、两种模式的命令、产物核对清单、构建侧故障处置表、换版本要核的契约）。范例见 [openclaw-offline/BUILD.md](openclaw-offline/BUILD.md)。
+10. 写 `<组件>` 的预检脚本（可复制 `Test-OpenClawOfflineScripts.ps1` 的检查项：解析/5.1 语法面/ASCII/CRLF/锚点内容/**跨文件契约**），**全绿再打包**。
+11. 补第 4 节表格里新踩到的坑。
+12. 把新包登记进第 5 节表格。
 
 > 未在本仓库做过实机验证的结论，请在文档里明确标注为推断，不要写成既成事实。

@@ -165,7 +165,7 @@ Section 'Cross-file contract'
 
 foreach ($name in @('Make-OpenClawOfflineBundle.ps1', 'Install-OpenClawOffline.ps1',
                     'Upgrade-OpenClawOffline.ps1', 'install.cmd', 'upgrade.cmd',
-                    'UPGRADE.md', 'UPGRADE-BRIEF.md')) {
+                    'UPGRADE.md', 'UPGRADE-BRIEF.md', 'BUILD.md', 'docs\OFFLINE-CAPABILITIES.md')) {
     if (Test-Path (Join-Path $bundleDir $name)) { Pass "$name present" } else { Fail "$name present" }
 }
 
