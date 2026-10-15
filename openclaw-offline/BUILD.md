@@ -23,7 +23,7 @@
 | 目标平台 | **win32-x64**（脚本钉死 `$TargetPlatform`） | 目标机是气隙 Win10 x64 |
 | 构建机（app 模式） | **Windows x64**（Windows on ARM 会被拒绝） | 原生依赖架构绑定，无法在其他平台解析 |
 | 构建机（npmcache 模式） | 任意平台 | 用 `--os win32 --cpu x64 --force --ignore-scripts` 交叉预热 |
-| Node（构建机） | `>=24.16 <25` 或 `>=26.1`（脚本硬校验） | 这是 openclaw 的 `engines.node`；实测 `26.7.0` 可用 |
+| Node（构建机） | `>=24.16 <25` 或 `>=26.1`（脚本硬校验，实测 `26.7.0` 可用） | 这是 openclaw 的 `engines.node`。**并且最好与目标机装同一个 Node 版本**：原生依赖的预编译二进制是按「平台+ABI」选的，构建机用什么 Node，目标机就该用什么 Node（脚本会在构建时打印这条提醒）。升级 Node 后要**重开 shell** 让 PATH 生效 |
 | npm | 随 Node 即可；11.x / 12.x 都支持 | 脚本会解析 npm 的"未放行脚本"清单并自动补跑一次全量 `--allow-scripts` |
 | PowerShell | Windows：**5.1**；macOS/Linux：`pwsh` 7 | 脚本只用 PS 5.1 语法面，两边都能跑 |
 | 网络 | `registry.npmjs.org`（必需）；`nodejs.org`（仅 `-IncludeNode`） | 全程只读上游，不写任何 registry |

@@ -84,7 +84,7 @@
 - **安装根**：单一目录，默认 `C:\OpenClaw`；包内目录名固定（`app\`、`docs\`、`npm-cache\`），**不可重命名**。
 - **配置与日志**：集中在用户目录，如 `%USERPROFILE%\.openclaw\openclaw.json`、`%USERPROFILE%\.openclaw\logs`。
 - **监听约定**：本地服务默认绑 **loopback**，端口取高位（Gateway 用 `18789`，`ws://127.0.0.1:18789`）。
-- **传输介质**：U 盘/移动硬盘。**文件会带 MOTW，安装前必须 `Get-ChildItem -Recurse | Unblock-File`**（[Make:847](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L847)）。
+- **传输介质**：U 盘/移动硬盘。**文件会带 MOTW，安装前必须 `Get-ChildItem -Recurse | Unblock-File`**（[Make:852](openclaw-offline/Make-OpenClawOfflineBundle.ps1#L852)）。
 - **体积敏感**：预构建 app 树实测 **574 MB（2026.9.5）/ 730 MB（2026.9.9）**；升级包另需 tarball（~98–114 MB）与预热 npm cache，升级期间磁盘峰值（stage + 救援整树）可能到 ~1.5 GB。`npmcache` 模式的整包实测 **439 MB**（2026.10.3：cache 320 + tarball 98 + docs 20）。拷贝前应能删掉 `_download\` 中间产物。
 - 磁盘余量、内存、机器名/序列号 ❓ 未记录。
 

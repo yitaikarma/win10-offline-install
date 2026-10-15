@@ -173,7 +173,7 @@ $anchorExpectations = @{
     'Install:223-238' = 'Checking the Node runtime'
     'Install:298'     = 'needAllow'
     'Make:20-22'      = 'build on Windows x64'
-    'Make:847'        = 'Unblock-File'
+    'Make:852'        = 'Unblock-File'
     'Install:170-184' = "# mode 'app'"
 }
 
@@ -311,6 +311,12 @@ if (-not (Test-Path $readmePath)) {
         }
     }
     if ($found -eq 0) { Fail 'No #L anchors found in README.md - the anchor check verified nothing.' }
+    elseif ($found -lt $anchorExpectations.Count) {
+        # A truncated or stale README.md (wrong root, partial copy, unzip that stopped early)
+        # would silently shrink this check to whatever is left. Every registered expectation
+        # must be present, otherwise the check is not covering the contracts it claims to.
+        Fail "$found README anchor(s) found but $($anchorExpectations.Count) content expectations are registered - README.md at $readmePath is stale or truncated (copy it again from the repository root)"
+    }
     else { Pass "$found README anchor(s) checked (label + content)" }
 }
 

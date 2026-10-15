@@ -398,8 +398,13 @@ $hostNodeRaw = "$($nodeProbe.Lines | Select-Object -Last 1)".Trim()
 if ($hostNodeRaw -notmatch '^v(\d+)\.(\d+)\.(\d+)') { throw "Unrecognized Node version: $hostNodeRaw" }
 $hostNode = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
 $nodeOk = (($hostNode -ge [version]$NodeFloor -and $hostNode -lt [version]$NodeCeiling) -or ($hostNode -ge [version]$NodeAltFloor))
-if (-not $nodeOk) { throw "Local Node $hostNodeRaw is unsupported (need >=24.16 <25, or >=26.1)." }
+if (-not $nodeOk) {
+    throw "Local Node $hostNodeRaw is unsupported (need >=24.16 <25, or >=26.1, because native prebuilds are picked per platform+ABI). Install a supported Node (nvm-windows: 'nvm install 26.7.0' then 'nvm use 26.7.0'), reopen the shell so PATH is refreshed, and re-run."
+}
 Write-Ok "Local Node $hostNodeRaw"
+# The app tree's native packages are resolved for THIS Node (platform + ABI), so the air-gapped
+# host must run the same Node major - ideally the exact same version.
+Write-Note "Reminder: install the same Node version on the air-gapped host (this build used $hostNodeRaw)."
 
 $npmProbe = Invoke-Native -Command 'npm' -Arguments @('--version')
 $npmVerRaw = "$($npmProbe.Lines | Select-Object -Last 1)".Trim()
