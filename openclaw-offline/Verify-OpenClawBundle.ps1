@@ -25,8 +25,9 @@
     trip before anything is installed.
 
 .PARAMETER BundleDir
-    Bundle folder. Defaults to the folder this script sits in, so the carried copy needs no
-    arguments.
+    Optional override. With no argument the script verifies the folder it sits in when that
+    folder holds bundle-manifest.json (the carried copy inside a bundle), otherwise
+    <script folder>\openclaw-offline-bundle (the copy in the component folder).
 
 .PARAMETER SkipSmoke
     Skip check 9 (it starts the staged CLI, which may create a state directory on this host).
@@ -54,6 +55,24 @@ function Pass([string]$Message) { Write-Host "  OK    $Message" -ForegroundColor
 function Fail([string]$Message) { $script:failures.Add($Message) | Out-Null; Write-Host "  FAIL  $Message" -ForegroundColor Red }
 function Note([string]$Message) { Write-Host "  note  $Message" -ForegroundColor Yellow }
 function Section([string]$Text) { Write-Host "`n==> $Text" -ForegroundColor Cyan }
+# Running a native command that writes to stderr while $ErrorActionPreference is 'Stop' makes
+# Windows PowerShell raise a terminating NativeCommandError (even with a 2>&1 redirect), which
+# would kill this checker mid-run. Relax it for the duration and trust the exit code instead -
+# the same rule the build/install scripts follow.
+function Invoke-NativeCapture([string]$Command, [string[]]$Arguments) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $text = ''
+    $code = -1
+    try {
+        $text = (& $Command @Arguments 2>&1 | Out-String).Trim()
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    return [pscustomobject]@{ Text = $text; ExitCode = $code }
+}
+
 function Get-Prop($Object, [string]$Name) {
     if ($null -eq $Object) { return $null }
     $p = $Object.PSObject.Properties[$Name]
@@ -72,7 +91,22 @@ if (-not $scriptDir) {
 }
 if (-not $scriptDir) { $scriptDir = (Get-Location).Path }
 
-if (-not $BundleDir) { $BundleDir = $scriptDir }
+if (-not $BundleDir) {
+    if (Test-Path (Join-Path $scriptDir 'bundle-manifest.json')) {
+        # Carried copy: running from inside the bundle.
+        $BundleDir = $scriptDir
+    } elseif (Test-Path (Join-Path (Join-Path $scriptDir 'openclaw-offline-bundle') 'bundle-manifest.json')) {
+        # Component copy: the bundle built next to these scripts.
+        $BundleDir = Join-Path $scriptDir 'openclaw-offline-bundle'
+        Write-Host "No manifest next to this script - verifying $BundleDir"
+    } else {
+        Write-Host "No bundle found: expected bundle-manifest.json in" -ForegroundColor Red
+        Write-Host "  $scriptDir" -ForegroundColor Red
+        Write-Host "  $(Join-Path $scriptDir 'openclaw-offline-bundle')" -ForegroundColor Red
+        Write-Host 'Build one first (see BUILD.md), or pass -BundleDir <folder>.' -ForegroundColor Red
+        exit 1
+    }
+}
 $BundleDir = [System.IO.Path]::GetFullPath($BundleDir)
 
 Write-Host "Verifying bundle: $BundleDir"
@@ -200,8 +234,13 @@ else {
 }
 
 foreach ($name in @('Install-OpenClawOffline.ps1', 'Upgrade-OpenClawOffline.ps1', 'install.cmd',
-                    'upgrade.cmd', 'UPGRADE.md', 'UPGRADE-BRIEF.md', 'Verify-OpenClawBundle.ps1')) {
+                    'upgrade.cmd', 'UPGRADE.md', 'UPGRADE-BRIEF.md')) {
     if (Test-Path (Join-Path $BundleDir $name)) { Pass "$name present" } else { Fail "$name missing (the bundle must be self-contained)" }
+}
+if (Test-Path (Join-Path $BundleDir 'Verify-OpenClawBundle.ps1')) {
+    Pass 'Verify-OpenClawBundle.ps1 present (the target can verify the copy with no arguments)'
+} else {
+    Note 'this bundle predates Verify-OpenClawBundle.ps1 so it is not carried. Install and upgrade do not need it, but the air-gapped host then cannot verify the USB copy itself - copy this script into the bundle folder, or rebuild, to enable that.'
 }
 
 # ---------------------------------------------------------------- smoke test
@@ -217,26 +256,40 @@ if ($SkipSmoke) {
     $launcher = Join-Path $appDir 'openclaw.cmd'
     if (-not (Test-Path $launcher)) { Fail 'app\openclaw.cmd is missing' }
     else {
-        $cliOut = & $launcher --version 2>&1
-        $cliExit = $LASTEXITCODE
-        $cliText = ($cliOut | Out-String).Trim()
-        if ($cliExit -ne 0) { Fail "app\openclaw.cmd --version exited $cliExit`: $cliText" }
-        elseif ($cliText -notmatch [regex]::Escape($version)) { Fail "app\openclaw.cmd --version reported '$cliText' instead of $version" }
-        else { Pass "staged CLI runs: $cliText" }
+        $cliRun = Invoke-NativeCapture -Command $launcher -Arguments @('--version')
+        if ($cliRun.ExitCode -ne 0) { Fail "app\openclaw.cmd --version exited $($cliRun.ExitCode): $($cliRun.Text)" }
+        elseif ($cliRun.Text -notmatch [regex]::Escape($version)) { Fail "app\openclaw.cmd --version reported '$($cliRun.Text)' instead of $version" }
+        else { Pass "staged CLI runs: $($cliRun.Text)" }
     }
 
     $nodeCmd = Get-Command 'node' -ErrorAction SilentlyContinue
     if (-not $nodeCmd) { Fail 'node is not on PATH - the air-gapped host needs the supported Node version' }
     else {
-        Push-Location $appDir
-        try {
-            $koffiOut = & node -e "require('koffi'); console.log('koffi ok')" 2>&1
-            $koffiExit = $LASTEXITCODE
-        } finally {
-            Pop-Location
+        # koffi is a dependency OF openclaw, and npm 11 nests those under the package, so the
+        # probe has to run from a directory that can see openclaw's own node_modules.
+        $probeDirs = @((Join-Path (Join-Path $appDir 'node_modules') 'openclaw'), $appDir)
+        $loaded = $null
+        $notFound = $null
+        $loadFailed = $null
+        foreach ($probeDir in $probeDirs) {
+            if (-not (Test-Path $probeDir)) { continue }
+            Push-Location $probeDir
+            try {
+                $probe = Invoke-NativeCapture -Command 'node' -Arguments @('-e', "require('koffi'); console.log('koffi ok')")
+            } finally {
+                Pop-Location
+            }
+            if ($probe.ExitCode -eq 0) { $loaded = $probe; break }
+            # Keep the informative outcome: "not resolvable here" is only a note, but "found and
+            # refused to load" is the real ABI/PE failure this check exists for. A later probe
+            # directory must not mask it (that is exactly how a broken module hides).
+            if ($probe.Text -match 'Cannot find module') { if (-not $notFound) { $notFound = $probe } }
+            elseif (-not $loadFailed) { $loadFailed = $probe }
         }
-        if ($koffiExit -ne 0) { Fail "require('koffi') failed (native module unusable on this Node): $(($koffiOut | Out-String).Trim())" }
-        else { Pass "native module loads: $(($koffiOut | Out-String).Trim())" }
+        if ($loaded) { Pass "native module loads: $($loaded.Text)" }
+        elseif ($loadFailed) { Fail "require('koffi') failed - the native module cannot run on this Node: $(($loadFailed.Text -split "`n" | Select-Object -First 1))" }
+        elseif ($notFound) { Note "koffi is not resolvable from app\node_modules nor from the package folder (nested layout?) - the native-package and *.node checks above cover presence" }
+        else { Fail 'could not probe koffi: no app\node_modules\openclaw directory' }
     }
 
     $binaries = @(Get-ChildItem -Path (Join-Path $appDir 'node_modules') -Recurse -Include '*.node', '*.dll' -File -ErrorAction SilentlyContinue)
