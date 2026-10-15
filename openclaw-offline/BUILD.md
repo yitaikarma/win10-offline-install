@@ -106,6 +106,18 @@ node -e "require('koffi'); console.log('koffi ok')"        # 原生模块能被�
 > 注：`openclaw --version` 可能在构建机上创建 `%USERPROFILE%\.openclaw`（构建机是自己的机器，无妨；
 > 末尾的残留检查会如实报告）。
 
+**2026.10.3 / Windows x64 / Node 26.7.0 实测基线**（下次构建可照此对照）：
+
+```
+staged CLI runs: OpenClaw 2026.10.3 (59cb447)
+native module loads: koffi ok
+15 native binary file(s) present
+```
+
+配套的整包实测值：app 树 **42,080 文件 / 482.1 MB**、原生平台包 **7 个**、
+`installScriptPackages: openclaw, @google/genai, esbuild, koffi, protobufjs`、
+`docs` **1296 页**、tarball **98.2 MB**、缓存 **~300 MB / ~1,500 文件**。
+
 **上面这些项 = 一条命令**。`Verify-OpenClawBundle.ps1` 会逐项打印 OK / FAIL，任何一项失败就以非 0 退出（它随包交付，构建机和目标机都能跑）：
 
 ```powershell
